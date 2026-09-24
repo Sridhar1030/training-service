@@ -1,0 +1,6 @@
+packageName: training_service
+packageVersion: 0.1.0
+fastapiImplementationPackage: api_impl
+useExternalImplementationPackage: true
+serverPort: 8080
+sourceFolder: src

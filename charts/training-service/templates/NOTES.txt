@@ -1,0 +1,7 @@
+The Training Service is available inside the cluster at:
+
+  http://{{ include "training-service.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}
+
+Health check:
+
+  kubectl -n {{ .Release.Namespace }} get deployment {{ include "training-service.fullname" . }}
