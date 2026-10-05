@@ -6,7 +6,11 @@ __pycache__
 .mypy_cache
 .ruff_cache
 tests
-docs
-generated
+docs/*
+!docs/api
+docs/api/*
+!docs/api/openapi.yaml
 charts
 *.md
+!README.md
+.idea

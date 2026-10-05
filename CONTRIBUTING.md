@@ -1,6 +1,6 @@
 # Contributing
 
-1. Keep api/openapi.yaml as the source of truth for HTTP contract changes.
+1. Keep docs/api/openapi.yaml as the source of truth for HTTP contract changes.
 2. Regenerate the FastAPI server when the contract changes with
    make generate-server.
 3. Keep business logic out of generated files.

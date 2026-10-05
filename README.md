@@ -1,37 +1,41 @@
 # OpenDataHub Training Service
 
-OpenDataHub Training Service exposes a single API for submitting and managing
-distributed training jobs in an OpenShift AI environment.
+Python/FastAPI scaffold generated from the reviewed Training API contract in
+`docs/api/openapi.yaml`. The runnable application registers all eight contract
+operations and serves Swagger UI at `/docs`.
 
-The service is Python-based and uses FastAPI. The public contract is maintained
-in api/openapi.yaml; the server implementation is generated with OpenAPI
-Generator's python-fastapi generator and kept separate from handwritten
-application and backend adapters.
-
-## Current repository state
-
-This initial commit provides the runnable service shell, health probes, API
-contract, generation command, unit-test setup, and installable Helm chart.
-Training-job behavior will be added behind the generated routes.
-
-The planned backend boundary is:
-
-- Kubernetes/CodeFlare for project scope, permissions, Ray/Trainer resources,
-  and Kueue placement.
-- Kubernetes APIs directly for algorithm discovery and Kueue queue discovery.
-- Ray Jobs submission, through its Python client or equivalent REST adapter, for
-  submitting work to an existing Ray cluster once that integration is finalized.
-
-See docs/architecture.md for the structure and ownership rules, and
-docs/installation.md for Helm installation.
+API operations and authentication are unimplemented and fail closed with
+`501 Not Implemented`. Health and readiness probes remain available. This
+task does not submit jobs, query Kubernetes, or implement caller permissions.
 
 ## Local development
 
-Requirements: Python 3.11+ and uv.
+Requirements: Python 3.11+, [uv](https://docs.astral.sh/uv/), and a running
+Podman or Docker engine for OpenAPI Generator.
 
-    make install
-    make check
-    make run
+```bash
+make install       # generate server, then install dependencies
+make check         # lint, formatting, typing, focused unit tests
+make run
+```
 
-The local service listens on http://localhost:8080. The health endpoint is
-available at http://localhost:8080/healthz.
+Open http://localhost:8080/docs. Probes are at `/healthz` and `/readyz`.
+
+Generated code lives in the committed `src/training_service_api/` package.
+Its README and every Python file identify it as generated and not to be edited
+directly. Edit the contract or templates, run `make generate-server`, and
+commit the updated sources. Handwritten behavior belongs in
+`src/training_service/api_impl/` and supporting modules.
+
+Generate before building the existing container:
+
+```bash
+make generate-server
+podman build -f Containerfile -t training-service:dev .
+```
+
+The Python wheel and container include the generated package and canonical
+contract. Helm/deployment changes and backend implementations are separate
+tasks.
+
+See [API generation](docs/api/README.md) and [structure](docs/architecture.md).

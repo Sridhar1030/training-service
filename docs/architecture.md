@@ -1,48 +1,39 @@
-# Initial structure
+# Server scaffold structure
 
-The service is intentionally split into generated HTTP plumbing and handwritten
-application behavior:
+```text
+training-service/
+├── docs/api/
+│   ├── openapi.yaml                   # reviewed contract, unchanged
+│   ├── openapi-generator-config.yaml # python-fastapi settings
+│   ├── format_generated.py           # value-preserving string wrapping
+│   └── templates/python-fastapi/     # reproducible generator overrides
+├── src/training_service_api/          # generated, committed; do not edit
+├── src/training_service/
+│   ├── main.py                       # generated routers, Swagger, probes
+│   ├── api_impl/                     # future handwritten implementations
+│   ├── contract.py                   # canonical model validation and Swagger
+│   ├── contract_types.py             # scalar URI generator workaround
+│   └── errors.py                     # API error envelope
+├── tests/unit/                       # startup/routes, models, formatting
+└── Containerfile                     # packages both Python namespaces
+```
 
-    training-service/
-    ├── api/
-    │   ├── openapi.yaml                    # public contract
-    │   └── openapi-generator-config.yaml  # python-fastapi generation settings
-    ├── charts/training-service/            # installable Helm chart
-    ├── docs/
-    │   ├── architecture.md
-    │   └── installation.md
-    ├── src/training_service/
-    │   ├── main.py                         # application composition and probes
-    │   ├── api_impl/                       # implementations called by generated routes
-    │   ├── application/                    # job lifecycle use cases
-    │   ├── domain/                         # API-facing models and status mapping
-    │   └── adapters/
-    │       ├── kubernetes/                 # K8s APIs, Kueue, and Trainer resources
-    │       └── ray/                        # Ray job submission/status/log adapters
-    ├── tests/unit/                         # focused unit tests only
-    ├── Containerfile
-    ├── Makefile
-    └── pyproject.toml
+Only one FastAPI application runs. Generated routers and models form a
+library imported by the handwritten entry point; the wheel and container
+bundle both namespaces. Generation never overwrites handwritten source.
 
-## Endpoint ownership
+The application registers the contract's eight operations under `/api/v1`.
+Authentication and all API operations are unimplemented, fail closed with
+`501`, and perform no backend calls. `/healthz`, `/readyz`, `/docs`, and
+`/openapi.json` are available without a cluster.
 
-- Training-job creation and lifecycle operations use the Kubernetes/CodeFlare
-  layer for project scope, RBAC, Ray/Trainer resources, and Kueue placement.
-- GET /algorithms and GET /projects/{project}/queues use Kubernetes APIs
-  directly; they are not Ray SDK operations.
-- POST /training-jobs/estimate remains a pure application-domain calculation.
-- Ray submission is isolated behind the Ray adapter. The initial seam can use
-  ray.job_submission.JobSubmissionClient (the Python wrapper around the Ray
-  Jobs REST API), while Kubernetes/CodeFlare remains responsible for cluster
-  and scheduling concerns.
+## Ownership boundary
 
-The generated package must not contain Kubernetes calls or business rules.
-Those belong in the application and adapter layers so the OpenAPI contract can
-change without coupling the service to a particular execution backend.
+Routes, request/response models, credential interfaces, and formatting are
+generated. Canonical validation fills generator gaps without changing the
+contract. Authentication, project authorization, Kubernetes discovery,
+CodeFlare/Ray calls, and Helm deployment behavior belong to separate tasks
+and remain outside generated code.
 
-## Explicit non-goals for the initial repository
-
-- No Helm test suite.
-- No end-to-end cluster test matrix.
-- No demo or feedback workflow.
-- No decision to replace the Kubernetes/CodeFlare layer with the Ray Jobs API.
+The runtime Swagger copy changes only the server URL and documents the
+scaffold's `501` responses. The reviewed YAML remains the source of truth.

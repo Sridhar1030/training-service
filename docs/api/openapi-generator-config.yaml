@@ -1,0 +1,6 @@
+packageName: training_service_api
+packageVersion: 0.1.0
+fastapiImplementationPackage: impl
+disallowAdditionalPropertiesIfNotPresent: false
+serverPort: 8080
+sourceFolder: src

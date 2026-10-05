@@ -1,15 +1,36 @@
 """FastAPI application entry point."""
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+
+from training_service.contract import contract_document, load_contract
+from training_service.errors import ApiError
+from training_service_api.apis.estimations_api import router as estimations_router
+from training_service_api.apis.infrastructure_discovery_api import router as discovery_router
+from training_service_api.apis.observability_api import router as observability_router
+from training_service_api.apis.training_jobs_api import router as jobs_router
 
 
 def create_app() -> FastAPI:
     """Create the HTTP application."""
+    contract = load_contract()
     application = FastAPI(
-        title="OpenDataHub Training Service",
-        version="0.1.0",
-        description="API for submitting and managing distributed training jobs.",
+        title=contract["info"]["title"],
+        version=contract["info"]["version"],
+        description=contract["info"]["description"],
+        swagger_ui_parameters={"persistAuthorization": False},
     )
+
+    @application.exception_handler(ApiError)
+    async def api_error_handler(request: Request, error: ApiError) -> JSONResponse:
+        return JSONResponse(
+            status_code=error.status_code,
+            content={"code": error.code, "message": error.message},
+        )
+
+    for router in (estimations_router, discovery_router, observability_router, jobs_router):
+        application.include_router(router, prefix="/api/v1")
+    application.openapi = contract_document  # type: ignore[method-assign]
 
     @application.get("/healthz", include_in_schema=False)
     def health() -> dict[str, str]:

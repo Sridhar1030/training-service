@@ -22,6 +22,14 @@ jobs:
       - name: Set up Python
         run: uv python install 3.11
 
+      - name: Generate FastAPI server
+        run: make generate-server CONTAINER_RUNTIME=docker
+
+      - name: Check generated API is current
+        run: |
+          git diff --exit-code -- src/training_service_api
+          test -z "$(git status --porcelain --untracked-files=all -- src/training_service_api)"
+
       - name: Install dependencies
         run: uv sync --locked
 
