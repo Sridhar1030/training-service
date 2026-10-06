@@ -1,0 +1,33 @@
+from __future__ import annotations
+
+import json
+from enum import Enum
+from typing import Self
+{{#vendorExtensions.x-py-datetime-imports}}{{#-first}}from datetime import{{/-first}} {{{.}}}{{^-last}},{{/-last}}{{/vendorExtensions.x-py-datetime-imports}}
+{{#vendorExtensions.x-py-typing-imports}}{{#-first}}from typing import{{/-first}} {{{.}}}{{^-last}},{{/-last}}{{/vendorExtensions.x-py-typing-imports}}
+{{#vendorExtensions.x-py-pydantic-imports}}{{#-first}}from pydantic import{{/-first}} {{{.}}}{{^-last}},{{/-last}}{{/vendorExtensions.x-py-pydantic-imports}}
+
+
+class {{classname}}({{vendorExtensions.x-py-enum-type}}, Enum):
+    """API contract enum.
+
+    Schema: {{classname}} in docs/api/openapi.yaml.
+    """
+
+{{#allowableValues}}
+{{#enumVars}}
+    {{{name}}} = {{{value}}}
+{{/enumVars}}
+
+    @classmethod
+    def from_json(cls, json_str: str) -> Self:
+        """Parse a JSON enum value."""
+        return cls(json.loads(json_str))
+
+{{#defaultValue}}
+    @classmethod
+    def _missing_value_(cls, value):
+        if value is no_arg:
+            return cls.{{{.}}}
+{{/defaultValue}}
+{{/allowableValues}}

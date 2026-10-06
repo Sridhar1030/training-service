@@ -4,6 +4,7 @@ WORKDIR /opt/app-root/src
 
 COPY pyproject.toml README.md ./
 COPY src ./src
+COPY docs/api/openapi.yaml ./docs/api/openapi.yaml
 
 RUN pip install --no-cache-dir .
 

@@ -1,0 +1,9 @@
+"""Fail-closed authentication extension point for the generated scaffold."""
+
+from training_service.errors import ApiError
+from {{modelPackage}}.extra_models import TokenModel
+
+
+async def get_token_OpenShiftBearer() -> TokenModel:
+    """Do not authenticate callers or allow backend access in this scaffold."""
+    raise ApiError(501, "not_implemented", "OpenShift authentication is not implemented.")

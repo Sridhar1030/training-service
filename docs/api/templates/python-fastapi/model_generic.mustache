@@ -1,0 +1,125 @@
+from __future__ import annotations
+from training_service.contract import ContractModel
+from training_service.contract_types import TrainingInputURI
+import re
+from typing import Self
+
+{{#vendorExtensions.x-py-datetime-imports}}{{#-first}}from datetime import{{/-first}} {{{.}}}{{^-last}},{{/-last}}{{/vendorExtensions.x-py-datetime-imports}}
+{{#vendorExtensions.x-py-typing-imports}}{{#-first}}from typing import{{/-first}} {{{.}}}{{^-last}},{{/-last}}{{/vendorExtensions.x-py-typing-imports}}
+{{#vendorExtensions.x-py-pydantic-imports}}{{#-first}}from pydantic import{{/-first}} {{{.}}}{{^-last}},{{/-last}}{{/vendorExtensions.x-py-pydantic-imports}}
+{{#vendorExtensions.x-py-other-imports}}
+{{{.}}}
+{{/vendorExtensions.x-py-other-imports}}
+{{#vendorExtensions.x-py-model-imports}}
+{{{.}}}
+{{/vendorExtensions.x-py-model-imports}}
+class {{classname}}({{#parent}}{{{.}}}{{/parent}}{{^parent}}ContractModel{{/parent}}):
+    """API contract model.
+
+    Schema: {{classname}} in docs/api/openapi.yaml.
+    """
+{{#vars}}
+    {{name}}: {{{vendorExtensions.x-py-typing}}}
+{{/vars}}
+{{#vars}}
+    {{#vendorExtensions.x-regex}}
+
+    @field_validator('{{{name}}}')
+    def {{{name}}}_validate_regular_expression(cls, value):
+        """Validates the regular expression"""
+        {{^required}}
+        if value is None:
+            return value
+
+        {{/required}}
+        {{#required}}
+        {{#isNullable}}
+        if value is None:
+            return value
+
+        {{/isNullable}}
+        {{/required}}
+        if not re.match(r"{{{.}}}", value{{#vendorExtensions.x-modifiers}} ,re.{{{.}}}{{/vendorExtensions.x-modifiers}}):
+            raise ValueError(r"must validate the regular expression {{{vendorExtensions.x-pattern}}}")
+        return value
+    {{/vendorExtensions.x-regex}}
+    {{#isArray}}
+    {{#items}}
+    {{#vendorExtensions.x-regex}}
+
+    @field_validator('{{{name}}}')
+    def {{{name}}}_items_validate_regular_expression(cls, value):
+        """Validates the regular expression"""
+        {{^required}}
+        if value is None:
+            return value
+        {{/required}}
+        {{#required}}
+        {{#isNullable}}
+        if value is None:
+            return value
+        {{/isNullable}}
+        {{/required}}
+
+        for item in value:
+        {{#isNullable}}
+            if item is None:
+                continue
+
+        {{/isNullable}}
+            if not re.match(r"{{{.}}}", item{{#vendorExtensions.x-modifiers}} ,re.{{{.}}}{{/vendorExtensions.x-modifiers}}):
+                raise ValueError(r"must validate the regular expression {{{vendorExtensions.x-pattern}}}")
+        return value
+    {{/vendorExtensions.x-regex}}
+    {{/items}}
+    {{/isArray}}
+    {{#isEnum}}
+
+    @field_validator('{{{name}}}')
+    def {{{name}}}_validate_enum(cls, value):
+        """Validates the enum"""
+        {{^required}}
+        if value is None:
+            return value
+
+        {{/required}}
+        {{#required}}
+        {{#isNullable}}
+        if value is None:
+            return value
+
+        {{/isNullable}}
+        {{/required}}
+        {{#isArray}}
+        for i in value:
+            if i not in ({{#allowableValues}}{{#enumVars}}{{{value}}},{{^-last}} {{/-last}}{{/enumVars}}{{/allowableValues}}):
+                raise ValueError("each list item must be one of ({{#allowableValues}}{{#enumVars}}{{{value}}}{{^-last}}, {{/-last}}{{/enumVars}}{{/allowableValues}})")
+        {{/isArray}}
+        {{^isArray}}
+        if value not in ({{#allowableValues}}{{#enumVars}}{{{value}}},{{^-last}} {{/-last}}{{/enumVars}}{{/allowableValues}}):
+            raise ValueError("must be one of enum values ({{#allowableValues}}{{#enumVars}}{{{value}}}{{^-last}}, {{/-last}}{{/enumVars}}{{/allowableValues}})")
+        {{/isArray}}
+        return value
+    {{/isEnum}}
+{{/vars}}
+
+    model_config = ConfigDict(
+        populate_by_name=True,
+        validate_assignment=True,
+        protected_namespaces=(),
+        extra="{{#isAdditionalPropertiesTrue}}allow{{/isAdditionalPropertiesTrue}}{{^isAdditionalPropertiesTrue}}forbid{{/isAdditionalPropertiesTrue}}",
+    )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return self.model_dump(mode="json", by_alias=True, exclude_unset=True)
+
+    def to_json(self) -> str:
+        return self.model_dump_json(by_alias=True, exclude_unset=True)
+
+    @classmethod
+    def from_dict(cls, obj: Dict[str, Any]) -> Self:
+        return cls.model_validate(obj)
+
+    @classmethod
+    def from_json(cls, json_str: str) -> Self:
+        return cls.model_validate_json(json_str)

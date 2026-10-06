@@ -11,8 +11,8 @@ build/
 *.egg-info/
 .env
 
-# Generated OpenAPI output
-/generated/
+# OpenAPI Generator bookkeeping (API source under src/ is committed)
+/.openapi-generator/
 
 # Helm/package tooling
 .helmignore

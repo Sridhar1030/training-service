@@ -1,0 +1,37 @@
+# coding: utf-8
+
+{{>partial_header}}
+
+from typing import ClassVar, Dict, List, Tuple
+from {{modelPackage}}.extra_models import TokenModel
+
+{{#imports}}
+{{import}}
+{{/imports}}
+{{#securityImports.0}}from {{packageName}}.security_api import {{#securityImports}}get_token_{{.}}{{^-last}}, {{/-last}}{{/securityImports}}{{/securityImports.0}}
+
+class Base{{classname}}:
+    subclasses: ClassVar[Tuple] = ()
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        Base{{classname}}.subclasses = Base{{classname}}.subclasses + (cls,)
+{{#operations}}
+{{#operation}}
+    async def {{operationId}}(
+        self,
+        {{#allParams}}
+        {{>impl_argument_definition}},
+        {{/allParams}}
+        {{#authMethods}}
+        token_{{name}}: TokenModel,
+        {{/authMethods}}
+    ) -> {{returnType}}{{^returnType}}None{{/returnType}}:
+        """{{#summary}}{{.}}{{/summary}}{{^summary}}Implement this API operation.{{/summary}}"""
+        ...
+{{^-last}}
+
+
+{{/-last}}
+{{/operation}}
+{{/operations}}
