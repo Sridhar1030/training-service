@@ -5,3 +5,14 @@ The Training Service is available inside the cluster at:
 Health check:
 
   kubectl -n {{ .Release.Namespace }} get deployment {{ include "training-service.fullname" . }}
+
+  kubectl -n {{ .Release.Namespace }} port-forward service/{{ include "training-service.fullname" . }} 8080:{{ .Values.service.port }}
+
+  curl --fail http://127.0.0.1:8080/healthz
+  curl --fail http://127.0.0.1:8080/readyz
+{{- if .Values.route.enabled }}
+
+OpenShift Route:
+
+  oc -n {{ .Release.Namespace }} get route {{ include "training-service.fullname" . }}
+{{- end }}

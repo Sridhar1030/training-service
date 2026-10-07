@@ -3,9 +3,22 @@ SHELL := /bin/bash
 UV ?= uv
 OPENAPI_GENERATOR_VERSION ?= 7.25.0
 CONTAINER_RUNTIME ?= $(shell command -v podman 2>/dev/null || command -v docker 2>/dev/null)
-IMAGE ?= quay.io/opendatahub/training-service:latest
+IMAGE_PLATFORM ?=
+IMAGE_REPOSITORY ?= quay.io/opendatahub/training-service
+IMAGE_TAG ?= latest
+IMAGE ?= $(IMAGE_REPOSITORY):$(IMAGE_TAG)
+IMAGE_SMOKE_PORT ?= 18080
+IMAGE_SMOKE_CONTAINER ?= training-service-smoke
+CURL ?= curl
+HELM_RELEASE ?= training-service
+HELM_NAMESPACE ?= training-service
+HELM_CHART ?= charts/training-service
+HELM_OUTPUT_DIR ?= dist
+CHART_VERSION ?= 0.1.0
+APP_VERSION ?= $(IMAGE_TAG)
 
-.PHONY: install test lint format format-check typecheck check run generate-server helm-lint
+.PHONY: install test lint format format-check typecheck check run generate-server \
+	image-build image-push image-smoke helm-lint helm-template helm-package
 
 install: generate-server
 	$(UV) sync
@@ -31,6 +44,36 @@ check: lint format-check typecheck test
 run:
 	$(UV) run training-service
 
+image-build:
+	@test -n "$(CONTAINER_RUNTIME)" || (echo "podman or docker is required" >&2; exit 1)
+	$(CONTAINER_RUNTIME) build $(if $(IMAGE_PLATFORM),--platform $(IMAGE_PLATFORM),) \
+		-f Containerfile -t $(IMAGE) .
+
+image-push:
+	@test -n "$(CONTAINER_RUNTIME)" || (echo "podman or docker is required" >&2; exit 1)
+	$(CONTAINER_RUNTIME) push $(IMAGE)
+
+# Starts the built image locally and checks the process endpoints exposed by
+# the chart. The container is always removed, including after a failed check.
+image-smoke:
+	@test -n "$(CONTAINER_RUNTIME)" || (echo "podman or docker is required" >&2; exit 1)
+	@command -v $(CURL) >/dev/null || (echo "curl is required" >&2; exit 1)
+	-$(CONTAINER_RUNTIME) rm -f $(IMAGE_SMOKE_CONTAINER) >/dev/null 2>&1
+	$(CONTAINER_RUNTIME) run --detach --name $(IMAGE_SMOKE_CONTAINER) \
+		--publish $(IMAGE_SMOKE_PORT):8080 $(IMAGE)
+	@trap '$(CONTAINER_RUNTIME) rm -f $(IMAGE_SMOKE_CONTAINER) >/dev/null 2>&1 || true' EXIT; \
+	for attempt in {1..30}; do \
+		if $(CURL) --fail --silent --show-error http://127.0.0.1:$(IMAGE_SMOKE_PORT)/healthz >/dev/null \
+			&& $(CURL) --fail --silent --show-error http://127.0.0.1:$(IMAGE_SMOKE_PORT)/readyz >/dev/null; then \
+			echo "image smoke check passed"; \
+			exit 0; \
+		fi; \
+		sleep 1; \
+	done; \
+	$(CONTAINER_RUNTIME) logs $(IMAGE_SMOKE_CONTAINER); \
+	echo "image smoke check failed" >&2; \
+	exit 1
+
 generate-server:
 	@test -n "$(CONTAINER_RUNTIME)" || (echo "podman or docker is required" >&2; exit 1)
 	$(CONTAINER_RUNTIME) run --rm -v "$$(pwd):/local" \
@@ -50,4 +93,20 @@ generate-server:
 	$(UV) run --frozen ruff check src/training_service_api
 
 helm-lint:
-	helm lint charts/training-service
+	helm lint $(HELM_CHART)
+
+helm-template:
+	helm template $(HELM_RELEASE) $(HELM_CHART) \
+		--namespace $(HELM_NAMESPACE) >/dev/null
+	helm template $(HELM_RELEASE) $(HELM_CHART) \
+		--namespace $(HELM_NAMESPACE) \
+		--set route.enabled=true \
+		--set route.host=training-service.example.com \
+		--set route.tls.enabled=true >/dev/null
+
+helm-package:
+	mkdir -p $(HELM_OUTPUT_DIR)
+	helm package $(HELM_CHART) \
+		--destination $(HELM_OUTPUT_DIR) \
+		--version $(CHART_VERSION) \
+		--app-version $(APP_VERSION)

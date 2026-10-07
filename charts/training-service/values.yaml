@@ -18,6 +18,11 @@ serviceAccount:
 podAnnotations: {}
 podLabels: {}
 
+# Runtime configuration is intentionally generic until the authentication,
+# authorization, and SDK work defines the service's stable environment names.
+env: []
+envFrom: []
+
 podSecurityContext:
   runAsNonRoot: true
   seccompProfile:
@@ -33,6 +38,18 @@ securityContext:
 service:
   type: ClusterIP
   port: 8080
+
+# OpenShift Route exposure is optional and disabled by default. Enable it only
+# when the service's caller authentication and authorization controls are ready.
+route:
+  enabled: false
+  annotations: {}
+  host: ""
+  path: ""
+  tls:
+    enabled: false
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
 
 resources: {}
 
