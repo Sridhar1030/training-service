@@ -15,10 +15,10 @@ HELM_NAMESPACE ?= training-service
 HELM_CHART ?= charts/training-service
 HELM_OUTPUT_DIR ?= dist
 CHART_VERSION ?= 0.1.0
-APP_VERSION ?= $(IMAGE_TAG)
+APP_VERSION ?= $(CHART_VERSION)
 
 .PHONY: install test lint format format-check typecheck check run generate-server \
-	image-build image-push image-smoke helm-lint helm-template helm-package
+	image-build image-push image-smoke helm-check helm-lint helm-template helm-package
 
 install: generate-server
 	$(UV) sync
@@ -58,13 +58,14 @@ image-push:
 image-smoke:
 	@test -n "$(CONTAINER_RUNTIME)" || (echo "podman or docker is required" >&2; exit 1)
 	@command -v $(CURL) >/dev/null || (echo "curl is required" >&2; exit 1)
-	-$(CONTAINER_RUNTIME) rm -f $(IMAGE_SMOKE_CONTAINER) >/dev/null 2>&1
+	@set -e; \
+	$(CONTAINER_RUNTIME) rm -f $(IMAGE_SMOKE_CONTAINER) >/dev/null 2>&1 || true; \
+	trap '$(CONTAINER_RUNTIME) rm -f $(IMAGE_SMOKE_CONTAINER) >/dev/null 2>&1 || true' EXIT; \
 	$(CONTAINER_RUNTIME) run --detach --name $(IMAGE_SMOKE_CONTAINER) \
-		--publish $(IMAGE_SMOKE_PORT):8080 $(IMAGE)
-	@trap '$(CONTAINER_RUNTIME) rm -f $(IMAGE_SMOKE_CONTAINER) >/dev/null 2>&1 || true' EXIT; \
-	for attempt in {1..30}; do \
-		if $(CURL) --fail --silent --show-error http://127.0.0.1:$(IMAGE_SMOKE_PORT)/healthz >/dev/null \
-			&& $(CURL) --fail --silent --show-error http://127.0.0.1:$(IMAGE_SMOKE_PORT)/readyz >/dev/null; then \
+		--publish $(IMAGE_SMOKE_PORT):8080 $(IMAGE); \
+	for attempt in $$(seq 1 30); do \
+		if $(CURL) --fail --silent --max-time 2 http://127.0.0.1:$(IMAGE_SMOKE_PORT)/healthz >/dev/null \
+			&& $(CURL) --fail --silent --max-time 2 http://127.0.0.1:$(IMAGE_SMOKE_PORT)/readyz >/dev/null; then \
 			echo "image smoke check passed"; \
 			exit 0; \
 		fi; \
@@ -92,10 +93,14 @@ generate-server:
 	$(UV) run --frozen ruff format src/training_service_api
 	$(UV) run --frozen ruff check src/training_service_api
 
-helm-lint:
+
+helm-check:
+	@command -v helm >/dev/null || (echo "helm is required" >&2; exit 1)
+
+helm-lint: helm-check
 	helm lint $(HELM_CHART)
 
-helm-template:
+helm-template: helm-check
 	helm template $(HELM_RELEASE) $(HELM_CHART) \
 		--namespace $(HELM_NAMESPACE) >/dev/null
 	helm template $(HELM_RELEASE) $(HELM_CHART) \
@@ -104,7 +109,7 @@ helm-template:
 		--set route.host=training-service.example.com \
 		--set route.tls.enabled=true >/dev/null
 
-helm-package:
+helm-package: helm-check
 	mkdir -p $(HELM_OUTPUT_DIR)
 	helm package $(HELM_CHART) \
 		--destination $(HELM_OUTPUT_DIR) \

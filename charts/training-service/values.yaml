@@ -47,7 +47,8 @@ route:
   host: ""
   path: ""
   tls:
-    enabled: false
+    # Routes serve HTTPS by default when exposure is enabled.
+    enabled: true
     termination: edge
     insecureEdgeTerminationPolicy: Redirect
 

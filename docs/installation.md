@@ -89,6 +89,7 @@ Prefer a checked-in, environment-specific values file over a long list of
 runtime environment variables:
 
 ```yaml
+# values-development.yaml
 replicaCount: 1
 
 image:
@@ -120,7 +121,8 @@ those contracts are defined.
 kubectl -n training-service rollout status deployment/training-service
 kubectl -n training-service get deployment,pod,service
 
-kubectl -n training-service port-forward service/training-service 8080:8080
+export SERVICE_PORT=8080  # Match service.port in the values file.
+kubectl -n training-service port-forward service/training-service 8080:"$SERVICE_PORT"
 ```
 
 In another terminal:
@@ -131,10 +133,18 @@ curl --fail http://127.0.0.1:8080/readyz
 ```
 
 These health checks verify the packaged process. Final delivery verification
-should also confirm that the generated API routes are served under `/api/v1`.
-Until the backend dependencies are implemented, a `501` response from an API
-operation confirms the generated scaffold is present; it does not prove the
-operation itself is ready for customer use.
+should also confirm the generated API is available:
+
+```bash
+curl --fail http://127.0.0.1:8080/docs
+curl --fail http://127.0.0.1:8080/openapi.json
+curl -i http://127.0.0.1:8080/api/v1/algorithms
+```
+
+The generated API operation currently returns `501` from the OpenShift
+authentication stub. This confirms the generated route is registered, but it
+does not prove the operation is ready for customer use; authentication and
+backend integrations are tracked by RHOAIENG-96350 through RHOAIENG-96352.
 
 ## Optional OpenShift Route and TLS
 
@@ -171,10 +181,25 @@ tag has been built, pushed, and smoke-checked:
 
 ```bash
 export RELEASE_VERSION=0.1.0
+export IMAGE_REPOSITORY=quay.io/opendatahub/training-service
+export IMAGE_PLATFORM=linux/amd64
+
+make image-build \
+  IMAGE_REPOSITORY="$IMAGE_REPOSITORY" \
+  IMAGE_TAG="$RELEASE_VERSION" \
+  IMAGE_PLATFORM="$IMAGE_PLATFORM"
+make image-smoke \
+  IMAGE_REPOSITORY="$IMAGE_REPOSITORY" \
+  IMAGE_TAG="$RELEASE_VERSION"
+make image-push \
+  IMAGE_REPOSITORY="$IMAGE_REPOSITORY" \
+  IMAGE_TAG="$RELEASE_VERSION"
 
 make helm-package \
   CHART_VERSION="$RELEASE_VERSION" \
   APP_VERSION="$RELEASE_VERSION"
+
+helm show chart "dist/training-service-${RELEASE_VERSION}.tgz"
 ```
 
 The handoff record should contain:
