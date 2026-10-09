@@ -11,12 +11,19 @@ fullnameOverride: ""
 
 serviceAccount:
   create: true
-  automount: false
+  # TokenReview requires the pod to authenticate as its service account.
+  automount: true
   annotations: {}
   name: ""
 
 podAnnotations: {}
 podLabels: {}
+
+# Authenticate callers through the Kubernetes TokenReview API. This grants the
+# service account only permission to create TokenReview requests.
+authentication:
+  tokenReview:
+    enabled: true
 
 # Runtime configuration is intentionally generic until the authentication,
 # authorization, and SDK work defines the service's stable environment names.
@@ -39,15 +46,12 @@ service:
   type: ClusterIP
   port: 8080
 
-# OpenShift Route exposure is optional and disabled by default. Enable it only
-# when the service's caller authentication and authorization controls are ready.
 route:
   enabled: false
   annotations: {}
   host: ""
   path: ""
   tls:
-    # Routes serve HTTPS by default when exposure is enabled.
     enabled: true
     termination: edge
     insecureEdgeTerminationPolicy: Redirect

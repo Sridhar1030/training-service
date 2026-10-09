@@ -4,10 +4,13 @@
 
 """Fail-closed authentication extension point for the generated scaffold."""
 
-from training_service.errors import ApiError
+from fastapi import Request
+
+from training_service.auth import authenticate_request
 from training_service_api.models.extra_models import TokenModel
 
 
-async def get_token_OpenShiftBearer() -> TokenModel:
-    """Do not authenticate callers or allow backend access in this scaffold."""
-    raise ApiError(501, "not_implemented", "OpenShift authentication is not implemented.")
+async def get_token_OpenShiftBearer(request: Request) -> TokenModel:
+    """Validate the caller and return only verified identity fields."""
+    token = await authenticate_request(request)
+    return token

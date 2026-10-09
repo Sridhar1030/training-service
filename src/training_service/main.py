@@ -3,6 +3,7 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from training_service.auth import KubernetesTokenAuthenticator, OpenShiftTokenAuthenticator
 from training_service.contract import contract_document, load_contract
 from training_service.errors import ApiError
 from training_service_api.apis.estimations_api import router as estimations_router
@@ -11,7 +12,7 @@ from training_service_api.apis.observability_api import router as observability_
 from training_service_api.apis.training_jobs_api import router as jobs_router
 
 
-def create_app() -> FastAPI:
+def create_app(authenticator: OpenShiftTokenAuthenticator | None = None) -> FastAPI:
     """Create the HTTP application."""
     contract = load_contract()
     application = FastAPI(
@@ -21,11 +22,14 @@ def create_app() -> FastAPI:
         swagger_ui_parameters={"persistAuthorization": False},
     )
 
+    application.state.token_authenticator = authenticator or KubernetesTokenAuthenticator()
+
     @application.exception_handler(ApiError)
     async def api_error_handler(request: Request, error: ApiError) -> JSONResponse:
         return JSONResponse(
             status_code=error.status_code,
             content={"code": error.code, "message": error.message},
+            headers=error.headers,
         )
 
     for router in (estimations_router, discovery_router, observability_router, jobs_router):
