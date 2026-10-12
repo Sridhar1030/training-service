@@ -52,6 +52,10 @@ for _, name, _ in pkgutil.iter_modules(ns_pkg.__path__, ns_pkg.__name__ + "."):
             "model": ErrorResponse,
             "description": "Missing, invalid, or expired OpenShift bearer token",
         },
+        503: {
+            "model": ErrorResponse,
+            "description": "OpenShift token validation is temporarily unavailable",
+        },
         403: {
             "model": ErrorResponse,
             "description": (
@@ -173,6 +177,10 @@ async def list_training_jobs(
             "model": ErrorResponse,
             "description": "Missing, invalid, or expired OpenShift bearer token",
         },
+        503: {
+            "model": ErrorResponse,
+            "description": "OpenShift token validation is temporarily unavailable",
+        },
         403: {
             "model": ErrorResponse,
             "description": (
@@ -290,6 +298,10 @@ async def create_training_job(
             "model": ErrorResponse,
             "description": "Missing, invalid, or expired OpenShift bearer token",
         },
+        503: {
+            "model": ErrorResponse,
+            "description": "OpenShift token validation is temporarily unavailable",
+        },
         403: {
             "model": ErrorResponse,
             "description": (
@@ -381,6 +393,10 @@ async def get_training_job(
         401: {
             "model": ErrorResponse,
             "description": "Missing, invalid, or expired OpenShift bearer token",
+        },
+        503: {
+            "model": ErrorResponse,
+            "description": "OpenShift token validation is temporarily unavailable",
         },
         403: {
             "model": ErrorResponse,

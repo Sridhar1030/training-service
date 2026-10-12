@@ -1,6 +1,7 @@
 """Focused authentication-boundary tests without a live OpenShift cluster."""
 
-import asyncio
+import time
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock
 
 import pytest
@@ -30,6 +31,13 @@ class FakeAuthenticator:
     async def authenticate(self, token: str) -> CallerIdentity | None:
         self.tokens.append(token)
         return self.result
+
+
+class UnavailableAuthenticator:
+    """Simulates an unavailable OpenShift TokenReview service."""
+
+    async def authenticate(self, token: str) -> CallerIdentity | None:
+        raise AuthenticationUnavailable
 
 
 def protected_client(result: CallerIdentity | None) -> tuple[TestClient, FakeAuthenticator]:
@@ -64,6 +72,21 @@ def test_missing_or_malformed_bearer_credential_returns_401(header: str | None) 
         "message": "A valid OpenShift bearer token is required.",
     }
     assert authenticator.tokens == []
+
+
+def test_authentication_backend_unavailable_returns_contract_503() -> None:
+    client = TestClient(create_app(UnavailableAuthenticator()))
+
+    response = client.get(
+        "/api/v1/algorithms",
+        headers={"Authorization": "Bearer accepted-token"},
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "code": "authentication_unavailable",
+        "message": "OpenShift token validation is temporarily unavailable.",
+    }
 
 
 def test_rejected_token_returns_401_without_exposing_it() -> None:
@@ -123,7 +146,42 @@ def test_token_review_uses_a_finite_timeout() -> None:
     )
 
 
-def test_transport_failure_is_sanitized_as_authentication_unavailable(
+def test_token_review_status_error_is_authentication_unavailable() -> None:
+    authenticator = KubernetesTokenAuthenticator()
+    api = Mock()
+    api.create_token_review.return_value = client.V1TokenReview(
+        spec=client.V1TokenReviewSpec(token="unused"),
+        status=client.V1TokenReviewStatus(authenticated=False, error="token check unavailable"),
+    )
+    authenticator._api = api
+
+    with pytest.raises(AuthenticationUnavailable):
+        authenticator._review("accepted-token")
+
+
+def test_token_review_client_initializes_once_for_concurrent_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authenticator = KubernetesTokenAuthenticator()
+    api = Mock()
+    api.create_token_review.return_value = client.V1TokenReview(
+        spec=client.V1TokenReviewSpec(token="unused"),
+        status=client.V1TokenReviewStatus(authenticated=False),
+    )
+    load_config = Mock(side_effect=lambda: time.sleep(0.01))
+    create_api = Mock(return_value=api)
+    monkeypatch.setattr("training_service.auth.config.load_incluster_config", load_config)
+    monkeypatch.setattr("training_service.auth.client.AuthenticationV1Api", create_api)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(authenticator._review, ["token-one", "token-two"]))
+
+    load_config.assert_called_once()
+    create_api.assert_called_once()
+
+
+@pytest.mark.anyio
+async def test_transport_failure_is_sanitized_as_authentication_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     authenticator = KubernetesTokenAuthenticator()
@@ -134,4 +192,4 @@ def test_transport_failure_is_sanitized_as_authentication_unavailable(
     monkeypatch.setattr(authenticator, "_review", raise_transport_error)
 
     with pytest.raises(AuthenticationUnavailable):
-        asyncio.run(authenticator.authenticate("accepted-token"))
+        await authenticator.authenticate("accepted-token")

@@ -58,6 +58,8 @@ paths:
           $ref: '#/components/responses/400BadRequest'
         '401':
           $ref: '#/components/responses/401Unauthorized'
+        '503':
+          $ref: '#/components/responses/503AuthenticationUnavailable'
         '415':
           $ref: '#/components/responses/415UnsupportedMediaType'
         '422':
@@ -90,6 +92,8 @@ paths:
                       $ref: '#/components/schemas/AlgorithmDescriptor'
         '401':
           $ref: '#/components/responses/401Unauthorized'
+        '503':
+          $ref: '#/components/responses/503AuthenticationUnavailable'
         '403':
           $ref: '#/components/responses/403Forbidden'
 
@@ -240,6 +244,8 @@ paths:
           $ref: '#/components/responses/400BadRequest'
         '401':
           $ref: '#/components/responses/401Unauthorized'
+        '503':
+          $ref: '#/components/responses/503AuthenticationUnavailable'
         '403':
           $ref: '#/components/responses/403Forbidden'
         '404':
@@ -387,6 +393,8 @@ paths:
           $ref: '#/components/responses/400BadRequest'
         '401':
           $ref: '#/components/responses/401Unauthorized'
+        '503':
+          $ref: '#/components/responses/503AuthenticationUnavailable'
         '403':
           $ref: '#/components/responses/403Forbidden'
         '404':
@@ -544,6 +552,8 @@ paths:
                     selected_backend: ray
         '401':
           $ref: '#/components/responses/401Unauthorized'
+        '503':
+          $ref: '#/components/responses/503AuthenticationUnavailable'
         '403':
           $ref: '#/components/responses/403Forbidden'
         '404':
@@ -568,6 +578,8 @@ paths:
           $ref: '#/components/responses/400BadRequest'
         '401':
           $ref: '#/components/responses/401Unauthorized'
+        '503':
+          $ref: '#/components/responses/503AuthenticationUnavailable'
         '403':
           $ref: '#/components/responses/403Forbidden'
         '404':
@@ -628,6 +640,8 @@ paths:
           $ref: '#/components/responses/400BadRequest'
         '401':
           $ref: '#/components/responses/401Unauthorized'
+        '503':
+          $ref: '#/components/responses/503AuthenticationUnavailable'
         '403':
           $ref: '#/components/responses/403Forbidden'
         '404':
@@ -674,6 +688,8 @@ paths:
                 $ref: '#/components/schemas/QueueInfoResponse'
         '401':
           $ref: '#/components/responses/401Unauthorized'
+        '503':
+          $ref: '#/components/responses/503AuthenticationUnavailable'
         '403':
           $ref: '#/components/responses/403Forbidden'
         '404':
@@ -686,8 +702,9 @@ components:
       scheme: bearer
       description: >
         OpenShift bearer token for the caller. The token may be opaque; JWT is
-        not assumed. Missing or invalid credentials return 401. Authenticated
-        callers without the required project/resource permissions receive 403.
+        not assumed. Missing or invalid credentials return 401. If token validation
+        is temporarily unavailable, requests return 503. Authenticated callers without
+        the required project/resource permissions receive 403.
         Validating a token alone does not authorize any job operation. Caller identity
         must be propagated to supported downstream authentication boundaries,
         and caller credentials must not be logged or stored as durable state.
@@ -779,6 +796,15 @@ components:
           example:
             code: validation_error
             message: Request is valid JSON but fails schema or domain validation.
+    '503AuthenticationUnavailable':
+      description: OpenShift token validation is temporarily unavailable
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            code: authentication_unavailable
+            message: OpenShift token validation is temporarily unavailable.
     '501NotImplemented':
       description: Requested backend is not implemented in this Developer Preview
       content:
@@ -1336,6 +1362,7 @@ components:
             - ray_cluster_gone
             - unsupported_media_type
             - validation_error
+            - authentication_unavailable
             - not_implemented
           example: forbidden
         message:

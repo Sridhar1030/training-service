@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -41,11 +42,13 @@ class KubernetesTokenAuthenticator:
 
     def __init__(self) -> None:
         self._api: client.AuthenticationV1Api | None = None
+        self._api_lock = threading.Lock()
+        self._thread_limiter = anyio.CapacityLimiter(10)
 
     async def authenticate(self, token: str) -> CallerIdentity | None:
         """Validate a token without blocking FastAPI's event loop."""
         try:
-            return await anyio.to_thread.run_sync(self._review, token)
+            return await anyio.to_thread.run_sync(self._review, token, limiter=self._thread_limiter)
         except (ApiException, ConfigException, HTTPError) as error:
             # Do not log the request token or an API exception body that could contain it.
             _LOG.warning("OpenShift TokenReview is unavailable (%s)", type(error).__name__)
@@ -53,8 +56,11 @@ class KubernetesTokenAuthenticator:
 
     def _review(self, token: str) -> CallerIdentity | None:
         if self._api is None:
-            config.load_incluster_config()
-            self._api = client.AuthenticationV1Api()
+            # Multiple requests use worker threads. Initialize the shared client once.
+            with self._api_lock:
+                if self._api is None:
+                    config.load_incluster_config()
+                    self._api = client.AuthenticationV1Api()
 
         review = client.V1TokenReview(spec=client.V1TokenReviewSpec(token=token))
         result = self._api.create_token_review(
@@ -62,7 +68,9 @@ class KubernetesTokenAuthenticator:
             _request_timeout=_TOKEN_REVIEW_TIMEOUT_SECONDS,
         )
         status = result.status
-        if status is None or not status.authenticated or status.user is None:
+        if status is None or status.error:
+            raise AuthenticationUnavailable
+        if not status.authenticated or status.user is None:
             return None
 
         user = status.user
@@ -94,7 +102,7 @@ def _extract_bearer_token(request: Request) -> str:
         raise _unauthorized()
 
     parts = authorization.split()
-    if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1]:
+    if len(parts) != 2 or parts[0].lower() != "bearer":
         raise _unauthorized()
     return parts[1]
 
@@ -116,5 +124,6 @@ async def authenticate_request(request: Request) -> TokenModel:
     if identity is None:
         raise _unauthorized()
 
+    # This is the canonical verified identity for downstream request handling.
     request.state.caller_identity = identity
     return TokenModel(username=identity.username, uid=identity.uid, groups=list(identity.groups))

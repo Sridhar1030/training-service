@@ -40,6 +40,10 @@ for _, name, _ in pkgutil.iter_modules(ns_pkg.__path__, ns_pkg.__name__ + "."):
             "model": ErrorResponse,
             "description": "Missing, invalid, or expired OpenShift bearer token",
         },
+        503: {
+            "model": ErrorResponse,
+            "description": "OpenShift token validation is temporarily unavailable",
+        },
         403: {
             "model": ErrorResponse,
             "description": (
