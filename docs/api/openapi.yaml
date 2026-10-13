@@ -141,6 +141,10 @@ paths:
         job has started or completed. The returned id is the RayJob name and can
         be used with the detail and log endpoints in the same project.
       operationId: createTrainingJob
+      x-project-authorization:
+        group: ray.io
+        resource: rayjobs
+        verb: create
       tags:
         - Training Jobs
       parameters:
@@ -292,6 +296,10 @@ paths:
         Filters and pagination are applied to the authorized results; every page
         rechecks caller permissions and pagination is not a durable snapshot.
       operationId: listTrainingJobs
+      x-project-authorization:
+        group: ray.io
+        resource: rayjobs
+        verb: list
       tags:
         - Training Jobs
       parameters:
@@ -434,6 +442,11 @@ paths:
         omit submitted_by. Attribution is informational, may be modified by
         callers with metadata patch permissions, and is never an authorization input.
       operationId: getTrainingJob
+      x-project-authorization:
+        group: ray.io
+        resource: rayjobs
+        verb: get
+        resourceNameParameter: job_id
       tags:
         - Training Jobs
       responses:
@@ -569,6 +582,11 @@ paths:
         returns 409; this endpoint does not stop or cancel it. It does not delete
         checkpoints or model outputs.
       operationId: deleteTrainingJob
+      x-project-authorization:
+        group: ray.io
+        resource: rayjobs
+        verb: delete
+        resourceNameParameter: job_id
       tags:
         - Training Jobs
       responses:
@@ -604,6 +622,11 @@ paths:
         storage are out of scope. Logs are available only while the managed
         RayCluster is reachable.
       operationId: streamJobLogs
+      x-project-authorization:
+        group: ray.io
+        resource: rayjobs
+        verb: get
+        resourceNameParameter: job_id
       tags:
         - Observability
       parameters:
@@ -675,6 +698,10 @@ paths:
         and an empty queues list. Does not create, update, or delete queues or
         expose cluster-wide quota information.
       operationId: listQueues
+      x-project-authorization:
+        group: kueue.x-k8s.io
+        resource: localqueues
+        verb: list
       tags:
         - Infrastructure & Discovery
       parameters:
