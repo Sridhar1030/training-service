@@ -51,8 +51,8 @@ def test_all_generated_routes_fail_closed_without_backend_implementations() -> N
     assert {(method, path) for method, path, _ in cases} == expected
     for method, path, body in cases:
         response = client.request(method, "/api/v1" + path, json=body)
-        assert response.status_code == 501, response.text
-        assert response.json()["code"] == "not_implemented"
+        assert response.status_code == 401, response.text
+        assert response.json()["code"] == "unauthorized"
 
 
 def test_generated_models_preserve_approved_wire_format() -> None:

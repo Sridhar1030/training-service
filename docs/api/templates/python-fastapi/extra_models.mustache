@@ -1,7 +1,11 @@
 """Credential interface placeholder; authentication is implemented separately."""
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class TokenModel(BaseModel):
-    """Reserved for the handwritten authentication implementation."""
+    """Verified caller identity; no bearer credential is retained."""
+
+    username: str
+    uid: str | None = None
+    groups: list[str] = Field(default_factory=list)

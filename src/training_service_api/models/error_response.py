@@ -47,13 +47,14 @@ class ErrorResponse(ContractModel):
             "ray_cluster_gone",
             "unsupported_media_type",
             "validation_error",
+            "authentication_unavailable",
             "not_implemented",
         ):
             raise ValueError(
                 "must be one of enum values ('bad_request', 'unauthorized', "
                 "'forbidden', 'not_found', 'already_exists', 'job_not_terminal', "
                 "'logs_not_ready', 'ray_cluster_gone', 'unsupported_media_type', "
-                "'validation_error', 'not_implemented')"
+                "'validation_error', 'authentication_unavailable', 'not_implemented')"
             )
         return value
 
