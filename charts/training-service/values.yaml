@@ -19,8 +19,9 @@ serviceAccount:
 podAnnotations: {}
 podLabels: {}
 
-# Authenticate callers through the Kubernetes TokenReview API. This grants the
-# service account only permission to create TokenReview requests.
+# Authenticate callers and authorize project-scoped operations through Kubernetes
+# TokenReview and SubjectAccessReview APIs. The service account can create only
+# these review requests; it does not receive workload permissions.
 authentication:
   tokenReview:
     enabled: true

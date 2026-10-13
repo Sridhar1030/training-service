@@ -11,11 +11,13 @@ from fastapi import (
     Body,
     Path,
     Query,
+    Request,
     Security,
 )
 from pydantic import Field, StrictStr
 
 import training_service_api.impl
+from training_service.authorization import authorize_project_request
 from training_service.errors import ApiError
 from training_service_api.apis.training_jobs_api_base import BaseTrainingJobsApi
 from training_service_api.models.create_job_request import CreateJobRequest
@@ -54,7 +56,7 @@ for _, name, _ in pkgutil.iter_modules(ns_pkg.__path__, ns_pkg.__name__ + "."):
         },
         503: {
             "model": ErrorResponse,
-            "description": "OpenShift token validation is temporarily unavailable",
+            "description": "OpenShift authentication or authorization is temporarily unavailable",
         },
         403: {
             "model": ErrorResponse,
@@ -76,6 +78,7 @@ for _, name, _ in pkgutil.iter_modules(ns_pkg.__path__, ns_pkg.__name__ + "."):
     response_model_exclude_unset=True,
 )
 async def list_training_jobs(
+    request: Request,
     project: Annotated[
         StrictStr,
         Field(
@@ -150,6 +153,13 @@ async def list_training_jobs(
     token_OpenShiftBearer: TokenModel = Security(get_token_OpenShiftBearer),
 ) -> ListTrainingJobs200Response:
     """List training jobs in an OpenShift Project"""
+    await authorize_project_request(
+        request,
+        project,
+        group="ray.io",
+        resource="rayjobs",
+        verb="list",
+    )
     if not BaseTrainingJobsApi.subclasses:
         raise ApiError(501, "not_implemented", "This operation is not implemented in the scaffold.")
     return await BaseTrainingJobsApi.subclasses[0]().list_training_jobs(
@@ -179,7 +189,7 @@ async def list_training_jobs(
         },
         503: {
             "model": ErrorResponse,
-            "description": "OpenShift token validation is temporarily unavailable",
+            "description": "OpenShift authentication or authorization is temporarily unavailable",
         },
         403: {
             "model": ErrorResponse,
@@ -214,6 +224,7 @@ async def list_training_jobs(
     response_model_exclude_unset=True,
 )
 async def create_training_job(
+    request: Request,
     project: Annotated[
         StrictStr,
         Field(
@@ -275,6 +286,13 @@ async def create_training_job(
     token_OpenShiftBearer: TokenModel = Security(get_token_OpenShiftBearer),
 ) -> TrainingJobSubmission:
     """Submit a Ray training job in an OpenShift Project"""
+    await authorize_project_request(
+        request,
+        project,
+        group="ray.io",
+        resource="rayjobs",
+        verb="create",
+    )
     if not BaseTrainingJobsApi.subclasses:
         raise ApiError(501, "not_implemented", "This operation is not implemented in the scaffold.")
     return await BaseTrainingJobsApi.subclasses[0]().create_training_job(
@@ -300,7 +318,7 @@ async def create_training_job(
         },
         503: {
             "model": ErrorResponse,
-            "description": "OpenShift token validation is temporarily unavailable",
+            "description": "OpenShift authentication or authorization is temporarily unavailable",
         },
         403: {
             "model": ErrorResponse,
@@ -322,6 +340,7 @@ async def create_training_job(
     response_model_exclude_unset=True,
 )
 async def get_training_job(
+    request: Request,
     project: Annotated[
         StrictStr,
         Field(
@@ -369,6 +388,14 @@ async def get_training_job(
     token_OpenShiftBearer: TokenModel = Security(get_token_OpenShiftBearer),
 ) -> TrainingJob:
     """Get training job status and available details"""
+    await authorize_project_request(
+        request,
+        project,
+        group="ray.io",
+        resource="rayjobs",
+        verb="get",
+        resource_name=job_id,
+    )
     if not BaseTrainingJobsApi.subclasses:
         raise ApiError(501, "not_implemented", "This operation is not implemented in the scaffold.")
     return await BaseTrainingJobsApi.subclasses[0]().get_training_job(
@@ -396,7 +423,7 @@ async def get_training_job(
         },
         503: {
             "model": ErrorResponse,
-            "description": "OpenShift token validation is temporarily unavailable",
+            "description": "OpenShift authentication or authorization is temporarily unavailable",
         },
         403: {
             "model": ErrorResponse,
@@ -422,6 +449,7 @@ async def get_training_job(
     response_model_exclude_unset=True,
 )
 async def delete_training_job(
+    request: Request,
     project: Annotated[
         StrictStr,
         Field(
@@ -469,6 +497,14 @@ async def delete_training_job(
     token_OpenShiftBearer: TokenModel = Security(get_token_OpenShiftBearer),
 ) -> None:
     """Delete a terminal Ray training job record"""
+    await authorize_project_request(
+        request,
+        project,
+        group="ray.io",
+        resource="rayjobs",
+        verb="delete",
+        resource_name=job_id,
+    )
     if not BaseTrainingJobsApi.subclasses:
         raise ApiError(501, "not_implemented", "This operation is not implemented in the scaffold.")
     return await BaseTrainingJobsApi.subclasses[0]().delete_training_job(
