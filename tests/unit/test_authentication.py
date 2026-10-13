@@ -131,14 +131,24 @@ def test_token_review_uses_a_finite_timeout() -> None:
         spec=client.V1TokenReviewSpec(token="unused"),
         status=client.V1TokenReviewStatus(
             authenticated=True,
-            user=client.V1UserInfo(username="alice", uid="uid-1", groups=["team-a"]),
+            user=client.V1UserInfo(
+                username="alice",
+                uid="uid-1",
+                groups=["team-a"],
+                extra={"scopes.authorization.openshift.io": ["user:full"]},
+            ),
         ),
     )
     authenticator._api = api
 
     identity = authenticator._review("accepted-token")
 
-    assert identity == CallerIdentity("alice", "uid-1", ("team-a",))
+    assert identity == CallerIdentity(
+        "alice",
+        "uid-1",
+        ("team-a",),
+        {"scopes.authorization.openshift.io": ("user:full",)},
+    )
     api.create_token_review.assert_called_once()
     assert (
         api.create_token_review.call_args.kwargs["_request_timeout"]

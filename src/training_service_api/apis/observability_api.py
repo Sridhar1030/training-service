@@ -10,11 +10,13 @@ from fastapi import (
     APIRouter,
     Path,
     Query,
+    Request,
     Security,
 )
 from pydantic import Field, StrictBool, StrictStr
 
 import training_service_api.impl
+from training_service.authorization import authorize_project_request
 from training_service.errors import ApiError
 from training_service_api.apis.observability_api_base import BaseObservabilityApi
 from training_service_api.models.error_response import ErrorResponse
@@ -42,7 +44,7 @@ for _, name, _ in pkgutil.iter_modules(ns_pkg.__path__, ns_pkg.__name__ + "."):
         },
         503: {
             "model": ErrorResponse,
-            "description": "OpenShift token validation is temporarily unavailable",
+            "description": "OpenShift authentication or authorization is temporarily unavailable",
         },
         403: {
             "model": ErrorResponse,
@@ -72,6 +74,7 @@ for _, name, _ in pkgutil.iter_modules(ns_pkg.__path__, ns_pkg.__name__ + "."):
     response_model_exclude_unset=True,
 )
 async def stream_job_logs(
+    request: Request,
     project: Annotated[
         StrictStr,
         Field(
@@ -146,6 +149,14 @@ async def stream_job_logs(
     token_OpenShiftBearer: TokenModel = Security(get_token_OpenShiftBearer),
 ) -> str:
     """Read or follow training job driver logs"""
+    await authorize_project_request(
+        request,
+        project,
+        group="ray.io",
+        resource="rayjobs",
+        verb="get",
+        resource_name=job_id,
+    )
     if not BaseObservabilityApi.subclasses:
         raise ApiError(501, "not_implemented", "This operation is not implemented in the scaffold.")
     return await BaseObservabilityApi.subclasses[0]().stream_job_logs(

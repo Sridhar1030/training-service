@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import logging
 import threading
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Protocol
 
 import anyio
@@ -28,6 +29,7 @@ class CallerIdentity:
     username: str
     uid: str | None
     groups: tuple[str, ...]
+    extra: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 class OpenShiftTokenAuthenticator(Protocol):
@@ -80,6 +82,7 @@ class KubernetesTokenAuthenticator:
             username=user.username,
             uid=user.uid,
             groups=tuple(user.groups or ()),
+            extra={key: tuple(values) for key, values in (user.extra or {}).items()},
         )
 
 

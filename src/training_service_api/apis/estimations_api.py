@@ -44,7 +44,7 @@ for _, name, _ in pkgutil.iter_modules(ns_pkg.__path__, ns_pkg.__name__ + "."):
         },
         503: {
             "model": ErrorResponse,
-            "description": "OpenShift token validation is temporarily unavailable",
+            "description": "OpenShift authentication or authorization is temporarily unavailable",
         },
         415: {"model": ErrorResponse, "description": "Request body must use application/json"},
         422: {

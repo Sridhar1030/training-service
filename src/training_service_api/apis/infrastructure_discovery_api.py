@@ -9,11 +9,13 @@ from typing import Annotated
 from fastapi import (
     APIRouter,
     Path,
+    Request,
     Security,
 )
 from pydantic import Field, StrictStr
 
 import training_service_api.impl
+from training_service.authorization import authorize_project_request
 from training_service.errors import ApiError
 from training_service_api.apis.infrastructure_discovery_api_base import (
     BaseInfrastructureDiscoveryApi,
@@ -46,7 +48,7 @@ for _, name, _ in pkgutil.iter_modules(ns_pkg.__path__, ns_pkg.__name__ + "."):
         },
         503: {
             "model": ErrorResponse,
-            "description": "OpenShift token validation is temporarily unavailable",
+            "description": "OpenShift authentication or authorization is temporarily unavailable",
         },
         403: {
             "model": ErrorResponse,
@@ -84,7 +86,7 @@ async def list_algorithms(
         },
         503: {
             "model": ErrorResponse,
-            "description": "OpenShift token validation is temporarily unavailable",
+            "description": "OpenShift authentication or authorization is temporarily unavailable",
         },
         403: {
             "model": ErrorResponse,
@@ -106,6 +108,7 @@ async def list_algorithms(
     response_model_exclude_unset=True,
 )
 async def list_queues(
+    request: Request,
     project: Annotated[
         StrictStr,
         Field(
@@ -135,6 +138,13 @@ async def list_queues(
     token_OpenShiftBearer: TokenModel = Security(get_token_OpenShiftBearer),
 ) -> QueueInfoResponse:
     """List available Kueue LocalQueues in the OpenShift Project (if Kueue is enabled)"""
+    await authorize_project_request(
+        request,
+        project,
+        group="kueue.x-k8s.io",
+        resource="localqueues",
+        verb="list",
+    )
     if not BaseInfrastructureDiscoveryApi.subclasses:
         raise ApiError(501, "not_implemented", "This operation is not implemented in the scaffold.")
     return await BaseInfrastructureDiscoveryApi.subclasses[0]().list_queues(
