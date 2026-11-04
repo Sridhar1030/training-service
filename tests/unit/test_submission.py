@@ -15,6 +15,7 @@ import pytest
 from codeflare_sdk import RayJob
 from codeflare_sdk.common.kubernetes_cluster import auth as codeflare_auth
 from codeflare_sdk.ray.rayjobs.config import build_ray_cluster_spec
+from codeflare_sdk.vendored.python_client.kuberay_cluster_api import RayClusterApi
 from codeflare_sdk.vendored.python_client.kuberay_job_api import RayjobApi
 from fastapi import Request
 from fastapi.testclient import TestClient
@@ -1017,6 +1018,15 @@ def test_algorithm_parameters_cannot_override_platform_or_python_configuration(
 def test_real_sdk_submits_with_caller_client_and_configured_ray_image(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # CodeFlare's vendored wrappers load a default kubeconfig in __init__ even
+    # though RayJob immediately replaces their clients with the caller's client.
+    # Mock only that unused constructor side effect; keep the real SDK submit
+    # and RayJob manifest-building paths under test, without a cluster login.
+    def skip_default_config(self: RayjobApi | RayClusterApi) -> None:
+        self.kube_config = None
+
+    monkeypatch.setattr(RayjobApi, "__init__", skip_default_config)
+    monkeypatch.setattr(RayClusterApi, "__init__", skip_default_config)
     configuration = client.Configuration()
     configuration.api_key["authorization"] = "Bearer caller-token"
     caller_client = submission._CallerApiClient(configuration)
