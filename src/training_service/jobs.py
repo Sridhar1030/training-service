@@ -28,7 +28,7 @@ from pydantic import ValidationError as ModelValidationError
 from training_service.algorithm_parameters import validate_algorithm_parameters
 from training_service.auth import CallerIdentity
 from training_service.contract import component_validator
-from training_service.discovery import read_algorithm_catalog
+from training_service.discovery import default_queue_for_submission, read_algorithm_catalog
 from training_service.errors import ApiError
 from training_service.kubernetes_client import (
     TIMEOUT,
@@ -368,7 +368,7 @@ class CodeFlareJobBackend:
             locations["output"] = _parse_location(request.output.destination_uri, output=True)
         backend = get_backend(request.algorithm.name)
         try:
-            backend.validate_locations(locations)
+            backend.validate_locations(locations, parameters)
         except ValueError as error:
             raise _invalid(str(error)) from error
         payload = request.model_dump(mode="json", exclude_unset=True)
@@ -385,6 +385,7 @@ class CodeFlareJobBackend:
             catalog = read_algorithm_catalog(core_api, self._image)
             if request.algorithm.name not in catalog:
                 raise _invalid("Algorithm is not enabled in the configured image catalog.")
+            queue_name = request.queue_name or default_queue_for_submission(api_client, project)
             resolved, volumes, mounts = _storage_plan(
                 core_api, project, locations, resources.num_nodes or 1
             )
@@ -426,7 +427,7 @@ class CodeFlareJobBackend:
                     }
                 ),
                 cluster_config=cluster,
-                local_queue=request.queue_name,
+                local_queue=queue_name,
                 annotations=annotations,
                 api_client=api_client,
             )

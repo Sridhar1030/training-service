@@ -42,7 +42,9 @@ such Secret for both HF inputs and mounts its token file on all Ray pods
 without serializing the token into the RayJob. The GRPO notebook's
 `tasks_per_iteration` argument is not consumed by the reviewed Training Hub
 versions and is therefore rejected by this API; use `prompt_batch_size`
-instead. The exposed parameters are the reviewed common subset of Training
+instead. GRPO math rewards require a PVC JSONL dataset; Training Hub cannot
+open a Hugging Face repository ID as a local math-data file. The exposed
+parameters are the reviewed common subset of Training
 Hub 0.8.1 and 0.11.2, not every parameter of either version. Text LoRA's
 `assistant_only_loss` default differs between those runtimes; test the chosen
 image with the intended dataset format.
@@ -51,10 +53,11 @@ The API maps resources and queue settings to a CodeFlare RayJob.
 The `202` response returns the RayJob name as `id` and a project-scoped
 `Location` header; it does not mean training has completed.
 
-Set `TRAINING_RAY_IMAGE`, `TRAINING_ALGORITHM_CATALOG_NAMESPACE`, and
-`TRAINING_ALGORITHM_CATALOG_NAME` through the chart's existing `env` values
-or the process environment. Both discovery and submission require the same
-caller-readable, image-bound catalog (see the setup guide above). The image must
+Configure the image-bound catalog through the chart's `algorithmCatalog`
+values, or set `TRAINING_RAY_IMAGE`, `TRAINING_ALGORITHM_CATALOG_NAMESPACE`, and
+`TRAINING_ALGORITHM_CATALOG_NAME` and provision a caller-readable ConfigMap
+and RBAC manually (see the setup guide above). Both discovery and submission
+require the same catalog. The image must
 contain Training Hub and a Ray version compatible with the API's Ray 2.58.0;
 an exact match is preferable.
 The API image pins the RHOAI 3.6 CodeFlare SDK 0.40.1 and Ray 2.58.0 wheels;
@@ -86,9 +89,11 @@ compatibility with every target RHOAI/KubeRay release; the image is not
 confirmed as cluster-shipped. Use an approved, validated image digest for
 deployment; package availability in the product index does not prove an image
 ships in every RHOAI release. There is no default training image or catalog;
-submission returns `503` until both are configured. CodeFlare 0.40.1 accepts a per-RayJob
-Kubernetes client, so concurrent submissions use their respective callers
-without changing process-global SDK authentication.
+submission returns `503` until both are configured. CodeFlare 0.40.1 accepts a
+per-RayJob Kubernetes client for caller-scoped operations. Its constructors
+still initialize process-default Kubernetes configuration as a side effect, so
+the API pod needs valid in-cluster configuration; this does not authorize a
+submission through the service account.
 No service-side job store or hand-authored RayJob manifest is used.
 
 `pvc://` URIs refer to project PVCs. `hf://` and `s3://` URIs refer to

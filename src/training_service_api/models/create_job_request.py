@@ -37,11 +37,11 @@ class CreateJobRequest(ContractModel):
     queue_name: StrictStr | None = Field(
         default=None,
         description=(
-            "Optional Kueue LocalQueue in the target project. When omitted, "
-            "CodeFlare uses a configured default LocalQueue if one exists; "
-            "otherwise the job is submitted without a queue. Subject to caller "
-            "permissions and platform admission policy; this does not grant "
-            "access. "
+            "Optional Kueue LocalQueue in the target project. When omitted, the "
+            "API resolves a default LocalQueue with the caller's permissions. If "
+            "none exists, CodeFlare submits without a queue label, subject to "
+            "platform admission policy. Lookup failures are not treated as absence "
+            "of a default. This does not grant access to any queue. "
         ),
         json_schema_extra={"examples": ["team-alpha-local-queue"]},
     )

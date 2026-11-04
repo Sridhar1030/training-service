@@ -45,6 +45,12 @@ def read_algorithm_catalog(api: client.CoreV1Api, image: str) -> dict[str, dict[
     try:
         catalog = api.read_namespaced_config_map(name, namespace, _request_timeout=TIMEOUT)
     except ApiException as error:
+        if error.status == 403:
+            raise ApiError(
+                403,
+                "forbidden",
+                "Caller cannot read the configured algorithm catalog ConfigMap.",
+            ) from None
         if error.status == 404:
             raise _unavailable("The configured algorithm catalog was not found.") from None
         raise
@@ -91,6 +97,34 @@ def list_algorithms(request: Request) -> dict[str, Any]:
     return {"algorithms": list(catalog.values())}
 
 
+def _served_local_queue_version(api: client.ApiClient, *, required: bool = False) -> str | None:
+    """Discover the LocalQueue API version for both reads and safe submission."""
+    groups = client.ApisApi(api).get_api_versions(_request_timeout=TIMEOUT).groups
+    if not isinstance(groups, list):
+        raise _unavailable("Kubernetes returned invalid API discovery metadata.")
+    group = next((item for item in groups if item.name == KUEUE_GROUP), None)
+    if group is None:
+        if required:
+            raise _unavailable("Kueue is required by configuration but its API is absent.")
+        return None
+    if not isinstance(group.versions, list):
+        raise _unavailable("Kueue returned invalid API version metadata.")
+    served = {item.version for item in group.versions}
+    custom = client.CustomObjectsApi(api)
+    for version in ("v1beta2", "v1beta1"):
+        if version not in served:
+            continue
+        resources = custom.get_api_resources(KUEUE_GROUP, version, _request_timeout=TIMEOUT)
+        if not isinstance(resources.resources, list):
+            raise _unavailable("Kueue returned invalid resource discovery metadata.")
+        if any(
+            item.name == "localqueues" and item.namespaced and "list" in (item.verbs or [])
+            for item in resources.resources
+        ):
+            return version
+    raise _unavailable("Kueue does not expose a supported LocalQueue API version.")
+
+
 def queue_api_version(request: Request, project: str) -> str | None:
     """Check project access before distinguishing absent Kueue from denied access."""
     validate_names(project)
@@ -102,28 +136,60 @@ def queue_api_version(request: Request, project: str) -> str | None:
             raise _unavailable("TRAINING_KUEUE_ENABLED must be auto, true, or false.")
         if enabled == "false":
             return None
-        groups = client.ApisApi(api).get_api_versions(_request_timeout=TIMEOUT).groups
-        if not isinstance(groups, list):
-            raise _unavailable("Kubernetes returned invalid API discovery metadata.")
-        group = next((item for item in groups if item.name == KUEUE_GROUP), None)
-        if group is None:
-            return None
-        if not isinstance(group.versions, list):
-            raise _unavailable("Kueue returned invalid API version metadata.")
-        served = {item.version for item in group.versions}
-        custom = client.CustomObjectsApi(api)
-        for version in ("v1beta2", "v1beta1"):
-            if version not in served:
-                continue
-            resources = custom.get_api_resources(KUEUE_GROUP, version, _request_timeout=TIMEOUT)
-            if not isinstance(resources.resources, list):
-                raise _unavailable("Kueue returned invalid resource discovery metadata.")
-            if any(
-                item.name == "localqueues" and item.namespaced and "list" in (item.verbs or [])
-                for item in resources.resources
-            ):
-                return version
-        raise _unavailable("Kueue does not expose a supported LocalQueue API version.")
+        return _served_local_queue_version(api, required=enabled == "true")
+
+
+def default_queue_for_submission(api: client.ApiClient, project: str) -> str | None:
+    """Resolve an omitted queue with the caller, never silently bypass installed Kueue."""
+    version = _served_local_queue_version(api)
+    if version is None:
+        return None
+    custom = client.CustomObjectsApi(api)
+    continuation = ""
+    seen: set[str] = set()
+    defaults: list[str] = []
+    while True:
+        try:
+            page = custom.list_namespaced_custom_object(
+                KUEUE_GROUP,
+                version,
+                project,
+                "localqueues",
+                limit=500,
+                _continue=continuation,
+                _request_timeout=TIMEOUT,
+            )
+        except ApiException as error:
+            if error.status == 403:
+                raise ApiError(
+                    403,
+                    "forbidden",
+                    "Caller cannot list LocalQueues to resolve the default queue.",
+                ) from None
+            if error.status == 404:
+                raise _unavailable("Kueue LocalQueue listing is unavailable.") from None
+            raise
+        try:
+            for item in page["items"]:
+                if (
+                    item["metadata"]
+                    .get("annotations", {})
+                    .get("kueue.x-k8s.io/default-queue", "")
+                    .lower()
+                    == "true"
+                ):
+                    defaults.append(item["metadata"]["name"])
+            continuation = page.get("metadata", {}).get("continue", "")
+            if not continuation:
+                break
+            if not isinstance(continuation, str) or continuation in seen:
+                raise ValueError
+            seen.add(continuation)
+        except (KeyError, AttributeError, TypeError, ValueError):
+            raise _unavailable("Kueue returned an invalid LocalQueue response.") from None
+    if len(defaults) > 1:
+        raise _unavailable("Multiple default LocalQueues are configured in the project.")
+    return defaults[0] if defaults else None
 
 
 def list_queues(request: Request, project: str, version: str) -> dict[str, Any]:
@@ -133,7 +199,7 @@ def list_queues(request: Request, project: str, version: str) -> dict[str, Any]:
         continuation = ""
         seen: set[str] = set()
         while True:
-            with describe_not_found("Project", project):
+            try:
                 page = custom.list_namespaced_custom_object(
                     KUEUE_GROUP,
                     version,
@@ -143,6 +209,10 @@ def list_queues(request: Request, project: str, version: str) -> dict[str, Any]:
                     _continue=continuation,
                     _request_timeout=TIMEOUT,
                 )
+            except ApiException as error:
+                if error.status == 404:
+                    raise _unavailable("Kueue LocalQueue listing is unavailable.") from None
+                raise
             try:
                 if not isinstance(page["items"], list):
                     raise ValueError

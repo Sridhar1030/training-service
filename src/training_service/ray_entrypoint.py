@@ -8,6 +8,7 @@ Credentials are read from project-local Secret volumes inside the Ray pod.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +29,9 @@ class TrainingBackend:
         if gpu_count == 0:
             raise ValueError("The selected Training Hub algorithm requires GPUs.")
 
-    def validate_locations(self, locations: dict[str, dict[str, str]]) -> None:
+    def validate_locations(
+        self, locations: dict[str, dict[str, str]], parameters: dict[str, Any]
+    ) -> None:
         pass
 
     def cluster_options(
@@ -131,7 +134,13 @@ class OSFTBackend(SFTBackend):
             "weight_decay",
         ):
             if key in values:
-                values[key] = float(values[key])
+                try:
+                    converted = float(values[key])
+                except OverflowError:
+                    raise ValueError(f"OSFT {key} must be a finite number.") from None
+                if not math.isfinite(converted):
+                    raise ValueError(f"OSFT {key} must be a finite number.")
+                values[key] = converted
         return values
 
 
@@ -192,12 +201,22 @@ class LoRAGRPOBackend(TrainingBackend):
                 "prompt_batch_size * group_size must be divisible by 4 * gpus_per_node."
             )
 
-    def validate_locations(self, locations: dict[str, dict[str, str]]) -> None:
+    def validate_locations(
+        self, locations: dict[str, dict[str, str]], parameters: dict[str, Any]
+    ) -> None:
         if "output" not in locations or locations["output"]["scheme"] != "pvc":
             raise ValueError("lora_grpo requires a shared PVC output destination.")
         if any(locations[role]["scheme"] == "s3" for role in ("model", "dataset")):
             raise ValueError("lora_grpo inputs must be shared PVCs or Hugging Face repositories.")
         dataset = locations["dataset"]
+        if parameters.get("reward_type") == "math" and dataset["scheme"] == "hf":
+            raise ValueError("lora_grpo with reward_type=math requires a PVC JSONL dataset.")
+        if (
+            parameters.get("reward_type") == "math"
+            and dataset["scheme"] == "pvc"
+            and not dataset["path"].endswith(".jsonl")
+        ):
+            raise ValueError("lora_grpo with reward_type=math requires a PVC JSONL dataset.")
         if dataset["scheme"] == "pvc" and not dataset["path"].endswith((".json", ".jsonl")):
             raise ValueError("lora_grpo PVC dataset must be a JSON or JSONL file.")
         hf_secrets = {

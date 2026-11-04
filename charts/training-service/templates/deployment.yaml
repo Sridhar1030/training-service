@@ -46,9 +46,34 @@ spec:
             httpGet:
               path: /readyz
               port: http
-          {{- with .Values.env }}
+          {{- if or .Values.env .Values.algorithmCatalog.create }}
           env:
+            {{- if .Values.algorithmCatalog.create }}
+            {{- $catalog := mustFromJson (required "algorithmCatalog.json is required when algorithmCatalog.create=true" .Values.algorithmCatalog.json) }}
+            {{- $image := required "algorithmCatalog.json must specify image" $catalog.image }}
+            {{- $imageConfigured := false }}
+            {{- range .Values.env }}
+            {{- if eq .name "TRAINING_RAY_IMAGE" }}
+            {{- if ne (default "" .value) $image }}
+            {{- fail "env.TRAINING_RAY_IMAGE must match algorithmCatalog.json image" }}
+            {{- end }}
+            {{- $imageConfigured = true }}
+            {{- else if has .name (list "TRAINING_ALGORITHM_CATALOG_NAMESPACE" "TRAINING_ALGORITHM_CATALOG_NAME") }}
+            {{- fail "Remove catalog-managed namespace/name variables from env when algorithmCatalog.create=true" }}
+            {{- end }}
+            {{- end }}
+            {{- if not $imageConfigured }}
+            - name: TRAINING_RAY_IMAGE
+              value: {{ $image | quote }}
+            {{- end }}
+            - name: TRAINING_ALGORITHM_CATALOG_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+            - name: TRAINING_ALGORITHM_CATALOG_NAME
+              value: {{ .Values.algorithmCatalog.name | quote }}
+            {{- end }}
+            {{- with .Values.env }}
             {{- toYaml . | nindent 12 }}
+            {{- end }}
           {{- end }}
           {{- with .Values.envFrom }}
           envFrom:

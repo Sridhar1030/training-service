@@ -13,6 +13,7 @@ from training_service import discovery
 from training_service.auth import CallerIdentity
 from training_service.authorization import ProjectPermission
 from training_service.contract import load_contract
+from training_service.errors import ApiError
 from training_service.main import create_app
 
 IMAGE = "quay.io/example/ray@sha256:" + "a" * 64
@@ -134,6 +135,13 @@ def test_catalog_is_image_specific_and_does_not_auto_enable_algorithms(setup: An
     assert [item["name"] for item in response.json()["algorithms"]] == ["sft"]
 
 
+@pytest.mark.parametrize("names", [[], ["future_algorithm"]])
+def test_catalog_with_no_enabled_algorithms_returns_empty(setup: Any, names: list[str]) -> None:
+    http, kube, _ = setup
+    kube.catalog["algorithms"] = [{"name": name} for name in names]
+    assert http.get("/api/v1/algorithms", headers=HEADERS).json() == {"algorithms": []}
+
+
 @pytest.mark.parametrize("invalid", ["image", "schema", "duplicate", "malformed"])
 def test_catalog_drift_fails_closed(setup: Any, invalid: str) -> None:
     http, kube, _ = setup
@@ -170,6 +178,27 @@ def test_catalog_errors_preserve_rbac_and_sanitize_bodies(
     assert "private" not in response.text
     if status == 401:
         assert response.headers["www-authenticate"] == "Bearer"
+    if status == 403:
+        assert "algorithm catalog" in response.json()["message"]
+
+
+@pytest.mark.parametrize("status,expected", [(401, 401), (403, 403), (404, 503), (500, 503)])
+def test_catalog_failures_on_post_prevent_sdk_submission(
+    setup: Any, status: int, expected: int
+) -> None:
+    http, kube, _ = setup
+    kube.error = ApiException(status=status, reason="private upstream response")
+    examples = load_contract()["paths"]["/projects/{project}/training-jobs"]["post"]["requestBody"][
+        "content"
+    ]["application/json"]["examples"]
+    response = http.post(
+        "/api/v1/projects/team-alpha/training-jobs",
+        headers=HEADERS,
+        json=examples["pvc_inputs_output"]["value"],
+    )
+    assert response.status_code == expected
+    assert "private" not in response.text
+    assert kube.calls == [("catalog", "reviewed-runtime", "training-service")]
 
 
 @pytest.mark.parametrize("path", ["/algorithms", "/projects/team-alpha/queues"])
@@ -217,6 +246,92 @@ def test_absent_or_explicitly_disabled_kueue_returns_empty_after_project_check(
     assert kube.calls[0] == ("project", "team-alpha")
     assert not authorizer.calls
     assert not any(isinstance(item, tuple) and item[0] == "list" for item in kube.calls)
+
+
+def test_explicitly_disabled_kueue_skips_present_api(setup: Any, monkeypatch: Any) -> None:
+    http, kube, _ = setup
+    monkeypatch.setenv("TRAINING_KUEUE_ENABLED", "false")
+    response = http.get("/api/v1/projects/team-alpha/queues", headers=HEADERS)
+    assert response.json() == {"kueue_enabled": False, "queues": []}
+    assert kube.calls == [("project", "team-alpha")]
+
+
+def test_required_kueue_absence_is_unavailable(setup: Any, monkeypatch: Any) -> None:
+    http, kube, _ = setup
+    monkeypatch.setenv("TRAINING_KUEUE_ENABLED", "true")
+    kube.available = False
+    response = http.get("/api/v1/projects/team-alpha/queues", headers=HEADERS)
+    assert response.status_code == 503
+    assert "Kueue is required" in response.json()["message"]
+
+
+def test_present_kueue_with_no_localqueues_returns_empty(setup: Any) -> None:
+    http, kube, _ = setup
+    kube.pages = [{"items": [], "metadata": {}}]
+    response = http.get("/api/v1/projects/team-alpha/queues", headers=HEADERS)
+    assert response.json() == {"kueue_enabled": True, "queues": []}
+
+
+def test_localqueue_list_404_is_not_mislabeled_project_not_found(
+    setup: Any, monkeypatch: Any
+) -> None:
+    http, kube, _ = setup
+
+    def missing(*args: Any, **kwargs: Any) -> None:
+        raise ApiException(status=404)
+
+    monkeypatch.setattr(kube, "list_namespaced_custom_object", missing)
+    response = http.get("/api/v1/projects/team-alpha/queues", headers=HEADERS)
+    assert response.status_code == 503
+    assert "LocalQueue" in response.json()["message"]
+
+
+@pytest.mark.parametrize("case,expected", [("default", "team-queue"), ("none", None), ("two", 503)])
+def test_omitted_submission_queue_uses_served_kueue_version_or_fails_closed(
+    setup: Any, case: str, expected: str | int
+) -> None:
+    _, kube, _ = setup
+    api = SimpleNamespace(
+        configuration=SimpleNamespace(
+            api_key={"authorization": "Bearer caller-token"}, verify_ssl=True
+        )
+    )
+    if case == "none":
+        kube.pages = [{"items": []}]
+    else:
+        item = {
+            "metadata": {
+                "name": "team-queue",
+                "annotations": {"kueue.x-k8s.io/default-queue": "true"},
+            }
+        }
+        kube.pages = [{"items": [item] * (2 if case == "two" else 1)}]
+    if case != "two":
+        assert discovery.default_queue_for_submission(api, "team-alpha") == expected
+    else:
+        with pytest.raises(ApiError) as raised:
+            discovery.default_queue_for_submission(api, "team-alpha")
+        assert raised.value.status_code == expected
+    assert ("resources", discovery.KUEUE_GROUP, "v1beta2") in kube.calls
+
+
+def test_omitted_submission_queue_fails_on_list_denial(setup: Any, monkeypatch: Any) -> None:
+    _, kube, _ = setup
+    api = SimpleNamespace(
+        configuration=SimpleNamespace(
+            api_key={"authorization": "Bearer caller-token"}, verify_ssl=True
+        )
+    )
+
+    def denied(*args: Any, **kwargs: Any) -> None:
+        raise ApiException(status=403, reason="private upstream response")
+
+    monkeypatch.setattr(kube, "list_namespaced_custom_object", denied)
+    with pytest.raises(ApiError) as raised:
+        discovery.default_queue_for_submission(api, "team-alpha")
+    assert raised.value.status_code == 403
+    assert "LocalQueues" in raised.value.message
+    assert "private" not in raised.value.message
 
 
 @pytest.mark.parametrize("status", [401, 403, 404])

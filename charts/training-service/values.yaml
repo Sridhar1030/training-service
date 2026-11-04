@@ -26,10 +26,18 @@ authentication:
   tokenReview:
     enabled: true
 
-# Runtime configuration is intentionally generic until the authentication,
-# authorization, and SDK work defines the service's stable environment names.
+# Additional process environment. The managed catalog sets its own three
+# variables when algorithmCatalog.create is true.
 env: []
 envFrom: []
+
+# Opt-in, image-bound algorithm catalog. Supply json with --set-file and list
+# the caller groups/users allowed to read this non-secret ConfigMap.
+algorithmCatalog:
+  create: false
+  name: training-algorithm-catalog
+  json: ""
+  readerSubjects: []
 
 podSecurityContext:
   runAsNonRoot: true

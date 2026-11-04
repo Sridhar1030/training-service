@@ -64,7 +64,14 @@ run containers to inspect images, trust an arbitrary image tag, or use the API
 service account to bypass RBAC. The administrator must review the selected image
 and publish its enabled profiles. Prefer an immutable image digest.
 
-Set these API deployment environment variables through the chart's `env` list:
+The chart can create the catalog ConfigMap and a narrowly scoped reader Role
+and RoleBinding. With `algorithmCatalog.create=true`, it also sets the catalog
+namespace/name variables and derives `TRAINING_RAY_IMAGE` from the catalog.
+An existing `TRAINING_RAY_IMAGE` entry in `env` is allowed only if it matches
+the catalog exactly; do not duplicate the namespace/name variables.
+
+If an administrator manages the ConfigMap and RBAC outside Helm instead, set
+these variables through the chart's `env` list:
 
 ```yaml
 env:
@@ -90,16 +97,55 @@ print(json.dumps({"image": os.environ["TRAINING_RAY_IMAGE"], "algorithms": [
     {"name": name, "parameter_schema": schemas[name]} for name in names
 ]}))
 PY
+```
+
+For the chart-managed path, add this to your deployment values file, replacing
+`training-users` with a group whose members are allowed to submit jobs:
+
+```yaml
+algorithmCatalog:
+  create: true
+  readerSubjects:
+    - kind: Group
+      name: training-users
+      apiGroup: rbac.authorization.k8s.io
+```
+
+Install or upgrade the service with that values file and the generated catalog:
+
+```bash
+helm upgrade --install training-service charts/training-service \
+  --namespace training-service --create-namespace \
+  -f /path/to/values.yaml \
+  --set-file algorithmCatalog.json=/tmp/training-algorithm-catalog.json
+```
+
+The catalog's `image` becomes `TRAINING_RAY_IMAGE`; it must name the approved
+runtime image. The catalog is non-secret, but its Role grants only `get` on the
+named ConfigMap to the chosen subjects. Callers outside those subjects receive
+`403` with a catalog-specific message. If chart-managed creation is disabled,
+the administrator must create the ConfigMap and caller RBAC before submitting.
+For example, after setting the three `env` values above:
+
+```bash
 oc create configmap training-algorithm-catalog -n training-service \
   --from-file=catalog.json=/tmp/training-algorithm-catalog.json \
   --dry-run=client -o yaml | oc apply -f -
+oc create role training-algorithm-catalog-reader -n training-service \
+  --verb=get --resource=configmaps \
+  --resource-name=training-algorithm-catalog \
+  --dry-run=client -o yaml | oc apply -f -
+oc create rolebinding training-algorithm-catalog-reader -n training-service \
+  --role=training-algorithm-catalog-reader --group=training-users \
+  --dry-run=client -o yaml | oc apply -f -
 ```
 
+Replace `training-users` with an approved caller group. The chart-managed
+path is preferred because Helm then owns and updates these resources together.
+
 Callers need `get` permission on this **named ConfigMap** in its configured
-namespace, in addition to existing project/workload permissions. Administrators
-can grant a namespaced Role with `resources: [configmaps]`,
-`resourceNames: [training-algorithm-catalog]`, and `verbs: [get]` to approved
-users/groups. No cluster-admin or Secret access is needed for discovery.
+namespace, in addition to existing project/workload permissions. No
+cluster-admin or Secret access is needed for discovery.
 Do not put credentials in the catalog. The service account retains only its
 TokenReview/SubjectAccessReview permissions.
 
@@ -117,10 +163,17 @@ Kueue API versions, authorizes LocalQueue listing, and returns only queue names
 and their referenced ClusterQueue names. It does not read ClusterQueue quotas.
 Both `v1beta1` and `v1beta2` are supported, preferring `v1beta2` when served.
 
-An absent Kueue API returns `200` with `kueue_enabled: false` and `queues: []`.
-`TRAINING_KUEUE_ENABLED=false` explicitly disables this helper; the default is
-`auto`. A denied/failed Kubernetes call is never reported as Kueue absence.
-This setting does not change CodeFlare's queue selection or admission behavior.
+An absent Kueue API returns `200` with `kueue_enabled: false` and `queues: []`
+when `TRAINING_KUEUE_ENABLED=auto` (the default). `false` explicitly disables
+this helper; `true` requires a served Kueue API and returns `503` if absent.
+A denied/failed Kubernetes call is never reported as Kueue absence.
+This setting does not change submission admission behavior. For an omitted
+`queue_name`, the API resolves the default LocalQueue through the caller's
+served Kueue API version and passes it explicitly to CodeFlare. Lookup errors
+fail the submission instead of silently dropping queue management. If no
+default queue exists, the job is submitted without a queue label, subject to
+platform admission policy. Explicit queue submissions do not require a
+LocalQueue list permission merely to resolve a default.
 
 ## Verification boundary
 

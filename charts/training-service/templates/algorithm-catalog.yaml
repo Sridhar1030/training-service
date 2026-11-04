@@ -1,0 +1,38 @@
+{{- if .Values.algorithmCatalog.create }}
+{{- $catalog := mustFromJson (required "algorithmCatalog.json is required when algorithmCatalog.create=true" .Values.algorithmCatalog.json) }}
+{{- if not $catalog.image }}{{ fail "algorithmCatalog.json must specify image" }}{{ end }}
+{{- if not .Values.algorithmCatalog.readerSubjects }}{{ fail "algorithmCatalog.readerSubjects must name approved callers" }}{{ end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.algorithmCatalog.name }}
+  labels:
+    {{- include "training-service.labels" . | nindent 4 }}
+data:
+  catalog.json: {{ .Values.algorithmCatalog.json | quote }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Values.algorithmCatalog.name }}-reader
+  labels:
+    {{- include "training-service.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: [{{ .Values.algorithmCatalog.name | quote }}]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Values.algorithmCatalog.name }}-reader
+  labels:
+    {{- include "training-service.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Values.algorithmCatalog.name }}-reader
+subjects:
+  {{- toYaml .Values.algorithmCatalog.readerSubjects | nindent 2 }}
+{{- end }}

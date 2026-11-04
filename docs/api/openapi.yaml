@@ -248,7 +248,7 @@ paths:
                   output:
                     destination_uri: pvc://training-output/checkpoints/pvc-training/
               grpo_hf_inputs_pvc_output:
-                summary: LoRA GRPO with a GPU-free Ray head and four-GPU worker
+                summary: Experimental LoRA GRPO; requires a compatible verl/TRL runtime
                 value:
                   name: grpo-toucan
                   backend: ray
@@ -964,9 +964,10 @@ components:
           nullable: true
           description: >
             Optional Kueue LocalQueue in the target project. When omitted,
-            CodeFlare uses a configured default LocalQueue if one exists;
-            otherwise the job is submitted without a queue. Subject to caller
-            permissions and platform admission policy; this does not grant access.
+            the API resolves a default LocalQueue with the caller's permissions.
+            If none exists, CodeFlare submits without a queue label, subject
+            to platform admission policy. Lookup failures are not treated as
+            absence of a default. This does not grant access to any queue.
           example: team-alpha-local-queue
         backend:
           $ref: '#/components/schemas/JobBackend'

@@ -534,6 +534,7 @@ def test_sdk_submission_metadata_and_topology_are_readable(
 
 def test_omitted_basic_options_use_contract_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     _mock_sdk(monkeypatch)
+    monkeypatch.setattr(submission, "default_queue_for_submission", lambda _api, _project: None)
     entry_config: dict[str, Any] = {}
 
     def record_entrypoint(configuration: dict[str, Any]) -> str:
@@ -561,6 +562,26 @@ def test_omitted_basic_options_use_contract_defaults(monkeypatch: pytest.MonkeyP
     assert len(cluster.volumes) == 2
     assert entry_config["parameters"] == {}
     assert "output" not in entry_config
+
+
+def test_omitted_queue_uses_caller_resolved_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    _mock_sdk(monkeypatch)
+    seen: list[tuple[Any, str]] = []
+
+    def resolve(api: Any, project: str) -> str:
+        seen.append((api, project))
+        return "reviewed-default"
+
+    monkeypatch.setattr(submission, "default_queue_for_submission", resolve)
+    payload = _sample().model_dump(mode="json", exclude_unset=True)
+    payload.pop("queue_name")
+    body = CreateJobRequest.model_validate(payload)
+    submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")._submit_sync(
+        "team-alpha", body, CallerIdentity("alice", None, ()), "caller-token"
+    )
+    assert seen[0][1] == "team-alpha"
+    assert seen[0][0].token == "caller-token"
+    assert FakeRayJob.instances[0].kwargs["local_queue"] == "reviewed-default"
 
 
 @pytest.mark.parametrize(
@@ -1051,6 +1072,9 @@ def test_real_sdk_submits_with_caller_client_and_configured_ray_image(
     assert identifier == "pvc-training"
     assert len(created) == 1
     assert created[0]["metadata"]["annotations"]["training.rhoai.io/submitted-by"] == "alice"
+    assert created[0]["metadata"]["labels"]["kueue.x-k8s.io/queue-name"] == (
+        "team-alpha-local-queue"
+    )
     spec = created[0]["spec"]["rayClusterSpec"]
     assert spec["rayVersion"] == "2.58.0"
     assert spec["headGroupSpec"]["template"].spec.containers[0].image == image
@@ -1155,6 +1179,7 @@ def test_example_algorithm_parameters_are_preserved(
         ("lora_grpo", {"param_offload": "true"}),
         ("lora_grpo", {"target_modules": ["q_proj"]}),
         ("lora_grpo", {"max_grad_norm": 0.1}),
+        ("osft", {**_OSFT_EXAMPLE_PARAMETERS, "eps": 10**400}),
     ],
 )
 def test_invalid_algorithm_parameters_get_422(algorithm: str, parameters: dict[str, Any]) -> None:
@@ -1354,11 +1379,18 @@ def test_http_post_rejects_invalid_algorithm_overrides(
     [
         {"resources": {"num_nodes": 1}},
         {"resources": {"gpus_per_node": 0}},
+        {"resources": {"gpu_type": "amd.com/gpu"}},
         {"algorithm": {"parameters": {"prompt_batch_size": 9, "group_size": 1}}},
+        {"algorithm": {"parameters": {"group_size": 4, "tensor_parallel_size": 3}}},
         {"output": {"destination_uri": "s3://checkpoint-storage/bucket/checkpoints/"}},
         {"model": {"uri": "s3://model-storage/bucket/model/"}},
         {"dataset": {"uri": "hf://other-secret/Agent-Ark/Toucan-1.5M"}},
         {"dataset": {"uri": "pvc://training-data/dataset/"}},
+        {"algorithm": {"parameters": {"group_size": 4, "reward_type": "math"}}},
+        {
+            "algorithm": {"parameters": {"group_size": 4, "reward_type": "math"}},
+            "dataset": {"uri": "pvc://training-data/dataset/train.json"},
+        },
     ],
 )
 def test_invalid_grpo_layout_or_inputs_fail_before_sdk(change: dict[str, Any]) -> None:
