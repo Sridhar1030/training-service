@@ -4,28 +4,92 @@ Python/FastAPI service generated from the Training API contract in
 `docs/api/openapi.yaml`. OpenShift TokenReview authenticates callers,
 SubjectAccessReview authorizes project operations, and POST training-job
 submission uses CodeFlare. Job listing, details, driver logs, and terminal
-RayJob deletion are implemented. Algorithm/queue discovery and estimation
-remain fail-closed with `501`.
+RayJob deletion, image-catalog algorithm discovery, and project queue discovery
+are implemented. Estimation remains fail-closed with `501`.
 
-## Basic Ray submission
+## Ray submission
 
-POST supports Training Hub `lora_sft` with the four basic numeric parameters
-in the contract. It maps resources and queue settings to a CodeFlare RayJob.
+POST dispatches through per-algorithm adapters to Training Hub algorithm/backend classes
+used by the [Ray fine-tuning examples](https://github.com/red-hat-data-services/red-hat-ai-examples/tree/main/examples/fine-tuning):
+`sft`, `osft`, `lora_sft`, and `lora_grpo`. Algorithm overrides are validated
+against the per-algorithm schemas in `docs/api/openapi.yaml`. Unsupported or
+malformed overrides return `422` rather than being passed to Training Hub.
+Each adapter owns its additional validation, data preparation, and Ray
+entrypoint settings. Training Hub's `create_algorithm` selects the explicit backend
+class; no single convenience function is hardcoded. New Training Hub algorithms
+are not exposed automatically. See [parameter coverage and discovery setup](docs/algorithm-discovery.md).
+
+OSFT requires `unfreeze_rank_ratio`, `effective_batch_size`,
+`max_tokens_per_gpu`, `max_seq_len`, and `learning_rate`. SFT and OSFT derive
+`data_output_dir` beneath the output directory. Model/data preparation shown
+in the notebooks is still performed before calling the API; the request uses
+existing project storage or Hugging Face repositories.
+
+For SFT, OSFT, and LoRA SFT, the Ray head runs training and receives
+`resources.gpus_per_node` GPUs, matching the one-node examples. For LoRA GRPO,
+`resources.num_nodes` includes a GPU-free head and at least one GPU worker;
+`gpus_per_node` is the GPU count **per worker**. The adapter derives Training
+Hub's `n_gpus` and `nnodes` from these resources and selects the `verl`
+backend. GRPO's head uses 4 CPUs/32Gi; CPU and memory fields size each worker.
+SFT, OSFT, and LoRA SFT require `num_nodes=1`; unsupported multi-node
+requests return `422` before resource lookup or submission. SFT/OSFT derive
+local torchrun process counts from `gpus_per_node`. Multi-GPU LoRA requires
+explicit `enable_model_splitting=true`; no distributed workers are launched.
+GRPO requires a shared ReadWriteMany PVC output and either shared PVC or HF
+inputs; S3 inputs/output are not supported for this topology. HF inputs must
+reference an existing project Secret, even for public repos. GRPO uses one
+such Secret for both HF inputs and mounts its token file on all Ray pods
+without serializing the token into the RayJob. The GRPO notebook's
+`tasks_per_iteration` argument is not consumed by the reviewed Training Hub
+versions and is therefore rejected by this API; use `prompt_batch_size`
+instead. The exposed parameters are the reviewed common subset of Training
+Hub 0.8.1 and 0.11.2, not every parameter of either version. Text LoRA's
+`assistant_only_loss` default differs between those runtimes; test the chosen
+image with the intended dataset format.
+
+The API maps resources and queue settings to a CodeFlare RayJob.
 The `202` response returns the RayJob name as `id` and a project-scoped
 `Location` header; it does not mean training has completed.
 
-Set `TRAINING_RAY_IMAGE` through the chart's existing `env` values or the
-process environment. The image must contain Ray and Training Hub, with a Ray
-version matching the version CodeFlare writes into the RayJob. The tested
-combination is CodeFlare SDK 0.38.2 with Ray 2.55.1 in the API image and
-`quay.io/modh/ray:2.55.1-py312-cu129-th081` for the RayJob (Ray 2.55.1,
-Training Hub 0.8.1). Use an approved image digest for deployment; this Quay
-tag has not been confirmed as shipped with RHOAI 3.6 GA. There is no default
-training image; submission returns `503` until one is configured. The API
-container installs the RHOAI 3.6 CodeFlare and Ray wheels. CodeFlare 0.38.2
-uses process-global authentication, so the adapter serializes SDK submission
-and restores the prior client after each caller. No service-side job store or
-hand-authored RayJob manifest is used.
+Set `TRAINING_RAY_IMAGE`, `TRAINING_ALGORITHM_CATALOG_NAMESPACE`, and
+`TRAINING_ALGORITHM_CATALOG_NAME` through the chart's existing `env` values
+or the process environment. Both discovery and submission require the same
+caller-readable, image-bound catalog (see the setup guide above). The image must
+contain Training Hub and a Ray version compatible with the API's Ray 2.58.0;
+an exact match is preferable.
+The API image pins the RHOAI 3.6 CodeFlare SDK 0.40.1 and Ray 2.58.0 wheels;
+CodeFlare writes Ray 2.58.0 into the RayJob and rejects known-mismatched
+runtime tags such as Ray 2.55.1. The `quay.io/modh/ray:2.58.0-py312-cu129-th081`
+runtime is **not currently a validated option**: a cluster probe failed while
+importing Training Hub because of an incompatible TorchAO/PyTorch combination.
+The newer `quay.io/modh/ray:2.58.0-py312-cu130-th0112` imported Training Hub
+0.11.2 in a cluster probe, but its installed Ray reported **2.58.1**, despite
+the 2.58.0 tag. The tested runtime was pinned to:
+
+```text
+quay.io/modh/ray@sha256:888ffb8008a095eff0e6f2f97335903f56867773b9493da4a46a92708d54cb55
+```
+
+A 2026-11-04 dev-cluster test using this digest, CodeFlare SDK
+0.40.1, and Ray 2.58.0 in the API completed one-GPU LoRA, SFT, and OSFT
+RayJobs with small test data and wrote model artifacts to an NFS PVC. An
+adapted LoRA GRPO request created a RayJob and reached verl, but the run failed
+inside the runtime image because `trl.experimental.ppo` and
+`AutoModelForCausalLMWithValueHead` could not be imported. That image's
+[lock](https://github.com/opendatahub-io/distributed-workloads/blob/main/images/runtime/ray/cuda/2.58.0-py312-cu130-th0112/Pipfile.lock)
+resolves TRL 1.17.0, while its
+[Dockerfile](https://github.com/opendatahub-io/distributed-workloads/blob/main/images/runtime/ray/cuda/2.58.0-py312-cu130-th0112/Dockerfile)
+installs verl 0.9.0. LoRA GRPO is **not**
+end-to-end verified with this image. This verifies the three successful
+smoke-test paths, not the example notebooks' full models and datasets or
+compatibility with every target RHOAI/KubeRay release; the image is not
+confirmed as cluster-shipped. Use an approved, validated image digest for
+deployment; package availability in the product index does not prove an image
+ships in every RHOAI release. There is no default training image or catalog;
+submission returns `503` until both are configured. CodeFlare 0.40.1 accepts a per-RayJob
+Kubernetes client, so concurrent submissions use their respective callers
+without changing process-global SDK authentication.
+No service-side job store or hand-authored RayJob manifest is used.
 
 `pvc://` URIs refer to project PVCs. `hf://` and `s3://` URIs refer to
 project Secrets; the selected training image also needs `datasets`,

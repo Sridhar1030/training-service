@@ -73,7 +73,14 @@ paths:
         caller's identity to discover the catalog and parameter schemas exposed
         by the configured Ray Universal Image for this deployment. The catalog
         is release- and image-specific; it is not a universal hardcoded list.
+        A configured ConfigMap contains catalog.json, bound to the exact
+        TRAINING_RAY_IMAGE value. Only reviewed API adapters with matching
+        parameter schemas are exposed; newly installed Training Hub algorithms
+        are not enabled automatically. Missing, malformed, or mismatched
+        catalog configuration returns 503. The caller needs get permission on
+        that named ConfigMap. Submission enforces the same catalog.
       operationId: listAlgorithms
+      x-request-context: true
       tags:
         - Infrastructure & Discovery
       responses:
@@ -93,7 +100,7 @@ paths:
         '401':
           $ref: '#/components/responses/401Unauthorized'
         '503':
-          $ref: '#/components/responses/503OpenShiftUnavailable'
+          $ref: '#/components/responses/503DiscoveryUnavailable'
         '403':
           $ref: '#/components/responses/403Forbidden'
 
@@ -140,6 +147,13 @@ paths:
         A successful response acknowledges RayJob creation, not that the Ray
         job has started or completed. The returned id is the RayJob name and can
         be used with the detail and log endpoints in the same project.
+        SFT, OSFT, and LoRA SFT currently require num_nodes=1; unsupported
+        multi-node requests return 422 rather than allocating unused workers.
+        Multi-GPU LoRA SFT requires enable_model_splitting=true.
+        For lora_grpo, the Ray head is GPU-free, at least one GPU worker is
+        required, output must be a shared ReadWriteMany PVC, and inputs must
+        be HF repositories or shared PVCs. Both HF inputs must reference the
+        same project Secret because the token file is mounted on every Ray pod.
       operationId: createTrainingJob
       x-submission-context: true
       x-project-authorization:
@@ -176,8 +190,8 @@ paths:
                       effective_batch_size: 8
                       max_seq_len: 2048
                   resources:
-                    num_nodes: 2
-                    gpus_per_node: 4
+                    num_nodes: 1
+                    gpus_per_node: 1
                     gpu_type: nvidia.com/gpu
                     cpus_per_node: "16"
                     memory_per_node: "64Gi"
@@ -201,8 +215,8 @@ paths:
                       effective_batch_size: 8
                       max_seq_len: 2048
                   resources:
-                    num_nodes: 2
-                    gpus_per_node: 4
+                    num_nodes: 1
+                    gpus_per_node: 1
                     gpu_type: nvidia.com/gpu
                     cpus_per_node: "16"
                     memory_per_node: "64Gi"
@@ -226,13 +240,42 @@ paths:
                       effective_batch_size: 8
                       max_seq_len: 2048
                   resources:
-                    num_nodes: 2
-                    gpus_per_node: 4
+                    num_nodes: 1
+                    gpus_per_node: 1
                     gpu_type: nvidia.com/gpu
                     cpus_per_node: "16"
                     memory_per_node: "64Gi"
                   output:
                     destination_uri: pvc://training-output/checkpoints/pvc-training/
+              grpo_hf_inputs_pvc_output:
+                summary: LoRA GRPO with a GPU-free Ray head and four-GPU worker
+                value:
+                  name: grpo-toucan
+                  backend: ray
+                  model:
+                    uri: hf://hf-secret-token/Qwen/Qwen3-4B
+                  dataset:
+                    uri: hf://hf-secret-token/Agent-Ark/Toucan-1.5M
+                  algorithm:
+                    name: lora_grpo
+                    parameters:
+                      num_iterations: 5
+                      group_size: 4
+                      prompt_batch_size: 100
+                      n_train: 200
+                      n_val: 10
+                      lora_r: 16
+                      lora_alpha: 8
+                      learning_rate: 0.00001
+                      gpu_memory_utilization: 0.2
+                  resources:
+                    num_nodes: 2
+                    gpus_per_node: 4
+                    gpu_type: nvidia.com/gpu
+                    cpus_per_node: "8"
+                    memory_per_node: "192Gi"
+                  output:
+                    destination_uri: pvc://training-output/checkpoints/grpo-toucan/
       responses:
         '202':
           description: RayJob created; training execution proceeds asynchronously
@@ -718,12 +761,18 @@ paths:
         caller's identity and permissions in the target project. Kueue is
         optional; if it is not installed or enabled, returns kueue_enabled=false
         and an empty queues list. Does not create, update, or delete queues or
-        expose cluster-wide quota information.
+        expose cluster-wide quota information. Project access is checked first.
+        When Kueue is present, LocalQueue list authorization is checked before
+        listing. Forbidden discovery or list access returns 403, never a false
+        disabled response. TRAINING_KUEUE_ENABLED=false explicitly disables
+        this discovery helper without altering SDK queue admission.
       operationId: listQueues
+      x-request-context: true
       x-project-authorization:
         group: kueue.x-k8s.io
         resource: localqueues
         verb: list
+        deferToHandler: true
       tags:
         - Infrastructure & Discovery
       parameters:
@@ -735,10 +784,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/QueueInfoResponse'
+        '400':
+          $ref: '#/components/responses/400BadRequest'
         '401':
           $ref: '#/components/responses/401Unauthorized'
         '503':
-          $ref: '#/components/responses/503OpenShiftUnavailable'
+          $ref: '#/components/responses/503DiscoveryUnavailable'
         '403':
           $ref: '#/components/responses/403Forbidden'
         '404':
@@ -854,6 +905,15 @@ components:
           example:
             code: authentication_unavailable
             message: OpenShift token validation is temporarily unavailable.
+    '503DiscoveryUnavailable':
+      description: Authentication, authorization, Kubernetes discovery, or configured image catalog is unavailable
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            code: backend_unavailable
+            message: The configured discovery backend is unavailable.
     '501NotImplemented':
       description: Requested backend is not implemented in this Developer Preview
       content:
@@ -891,9 +951,13 @@ components:
         name:
           type: string
           minLength: 1
-          maxLength: 47
+          maxLength: 34
           pattern: '^[a-z]([-a-z0-9]*[a-z0-9])?$'
-          description: DNS-1035-compatible RayJob name; limited to 47 characters by the submission path.
+          description: >
+            DNS-1035-compatible RayJob name. Limited to 34 characters because
+            KubeRay appends a cluster suffix and generates a
+            kube-rbac-proxy-config- volume name, which must fit Kubernetes'
+            63-character DNS-label limit.
           example: llama3-8b-alpaca-lora
         queue_name:
           type: string
@@ -1043,34 +1107,164 @@ components:
         name:
           type: string
           description: >
-            Algorithm identifier exposed by GET /algorithms for the configured
-            Ray Universal Image and release. Use that catalog and its parameter schema.
+            Training Hub algorithm identifier for the configured Ray image.
+            This submission adapter supports sft, osft, lora_sft, and lora_grpo.
           example: lora_sft
         parameters:
           type: object
           additionalProperties: true
           description: >
-            Optional hyperparameter overrides validated against the selected
-            algorithm's Training Hub parameter schema. Basic lora_sft overrides
-            include learning_rate, num_epochs, effective_batch_size (total
-            samples per optimizer update across GPUs and gradient accumulation),
-            and max_seq_len (maximum tokens per training sample). These are
-            optional overrides; example values are not API defaults. Omitted
-            parameters use the configured backend's defaults.
+            Algorithm-specific Training Hub overrides. Only parameters in the
+            selected x-parameter-schemas entry are accepted. GPU and node counts
+            come from resources, not algorithm parameters. Omitted overrides use
+            the Training Hub backend's defaults. OSFT requires its five training
+            parameters because its callable has no defaults for them.
           example:
             learning_rate: 0.00002
             num_epochs: 3
             effective_batch_size: 8
             max_seq_len: 2048
+      x-parameter-schemas:
+        sft:
+          type: object
+          additionalProperties: false
+          properties:
+            learning_rate: {type: number, minimum: 0, exclusiveMinimum: true, maximum: 1}
+            num_epochs: {type: integer, minimum: 1}
+            effective_batch_size: {type: integer, minimum: 1}
+            max_seq_len: {type: integer, minimum: 1}
+            max_tokens_per_gpu: {type: integer, minimum: 1}
+            save_samples: {type: integer, minimum: 0}
+            warmup_steps: {type: integer, minimum: 0}
+            checkpoint_at_epoch: {type: boolean}
+            accelerate_full_state_at_epoch: {type: boolean}
+            is_pretraining: {type: boolean}
+            block_size: {type: integer, minimum: 1}
+            document_column_name: {type: string, minLength: 1}
+            beta1: {type: number, minimum: 0, maximum: 1, exclusiveMaximum: true}
+            beta2: {type: number, minimum: 0, maximum: 1, exclusiveMaximum: true}
+            eps: {type: number, minimum: 0, exclusiveMinimum: true}
+            weight_decay: {type: number, minimum: 0}
+        osft:
+          type: object
+          additionalProperties: false
+          required:
+            - unfreeze_rank_ratio
+            - effective_batch_size
+            - max_tokens_per_gpu
+            - max_seq_len
+            - learning_rate
+          properties:
+            unfreeze_rank_ratio: {type: number, minimum: 0, maximum: 1}
+            effective_batch_size: {type: integer, minimum: 1}
+            max_tokens_per_gpu: {type: integer, minimum: 1}
+            max_seq_len: {type: integer, minimum: 1}
+            learning_rate: {type: number, minimum: 0, exclusiveMinimum: true, maximum: 1}
+            num_epochs: {type: integer, minimum: 1}
+            target_patterns:
+              type: array
+              minItems: 1
+              items: {type: string, minLength: 1}
+            seed: {type: integer, minimum: 0}
+            use_liger: {type: boolean}
+            use_processed_dataset: {type: boolean}
+            unmask_messages: {type: boolean}
+            lr_scheduler: {type: string, minLength: 1}
+            warmup_steps: {type: integer, minimum: 0}
+            lr_scheduler_kwargs:
+              type: object
+              additionalProperties: {type: string}
+            checkpoint_at_epoch: {type: boolean}
+            save_final_checkpoint: {type: boolean}
+            is_pretraining: {type: boolean}
+            block_size: {type: integer, minimum: 1}
+            document_column_name: {type: string, minLength: 1}
+            beta1: {type: number, minimum: 0, maximum: 1, exclusiveMaximum: true}
+            beta2: {type: number, minimum: 0, maximum: 1, exclusiveMaximum: true}
+            eps: {type: number, minimum: 0, exclusiveMinimum: true}
+            weight_decay: {type: number, minimum: 0}
+        lora_sft:
+          type: object
+          additionalProperties: false
+          properties:
+            learning_rate: {type: number, minimum: 0, exclusiveMinimum: true, maximum: 1}
+            num_epochs: {type: integer, minimum: 1}
+            effective_batch_size: {type: integer, minimum: 1}
+            max_seq_len: {type: integer, minimum: 1}
+            lora_r: {type: integer, minimum: 1}
+            lora_alpha: {type: integer, minimum: 1}
+            seed: {type: integer, minimum: 0}
+            use_rslora: {type: boolean}
+            weight_decay: {type: number, minimum: 0}
+            lora_dropout: {type: number, minimum: 0, maximum: 1}
+            target_modules:
+              type: array
+              minItems: 1
+              items: {type: string, minLength: 1}
+            micro_batch_size: {type: integer, minimum: 1}
+            gradient_accumulation_steps: {type: integer, minimum: 1}
+            lr_scheduler: {type: string, minLength: 1}
+            warmup_steps: {type: integer, minimum: 0}
+            max_grad_norm: {type: number, minimum: 0, exclusiveMinimum: true}
+            load_in_4bit: {type: boolean}
+            load_in_8bit: {type: boolean}
+            bnb_4bit_quant_type: {type: string, enum: [nf4, fp4]}
+            bnb_4bit_compute_dtype: {type: string, enum: [float16, bfloat16, float32]}
+            bnb_4bit_use_double_quant: {type: boolean}
+            sample_packing: {type: boolean}
+            bf16: {type: boolean}
+            fp16: {type: boolean}
+            save_steps: {type: integer, minimum: 1}
+            logging_steps: {type: integer, minimum: 1}
+            save_total_limit: {type: integer, minimum: 1}
+            dataset_type: {type: string, enum: [chat_template, alpaca, passthrough]}
+            field_messages: {type: string, minLength: 1}
+            field_instruction: {type: string, minLength: 1}
+            field_input: {type: string, minLength: 1}
+            field_output: {type: string, minLength: 1}
+            enable_model_splitting: {type: boolean}
+            finetune_vision_layers: {type: boolean}
+            finetune_language_layers: {type: boolean}
+        lora_grpo:
+          type: object
+          additionalProperties: false
+          properties:
+            data_config: {type: string, minLength: 1}
+            n_train: {type: integer, minimum: 1}
+            n_val: {type: integer, minimum: 0}
+            num_iterations: {type: integer, minimum: 1}
+            group_size: {type: integer, minimum: 1}
+            prompt_batch_size: {type: integer, minimum: 1}
+            learning_rate: {type: number, minimum: 0, exclusiveMinimum: true, maximum: 1}
+            max_tokens: {type: integer, minimum: 1}
+            max_prompt_length: {type: integer, minimum: 1}
+            lora_r: {type: integer, minimum: 1}
+            lora_alpha: {type: integer, minimum: 1}
+            gpu_memory_utilization: {type: number, minimum: 0, exclusiveMinimum: true, maximum: 1, exclusiveMaximum: true}
+            tensor_parallel_size: {type: integer, minimum: 1}
+            use_dr_grpo: {type: boolean}
+            reward_type: {type: string, enum: [tool_call, math]}
+            saves_per_epoch: {type: integer, minimum: 1}
+            param_offload: {type: boolean}
+            optimizer_offload: {type: boolean}
+            layered_summon: {type: boolean}
+            language_model_only: {type: boolean}
 
     ResourceSpec:
       type: object
       additionalProperties: false
       description: >
-        The only public source for worker and GPU topology. If omitted, platform
-        defaults are applied. Algorithm parameters describe hyperparameters,
-        not worker topology. For multi-node requests, every referenced PVC must
-        support ReadWriteMany access because Ray head and worker pods mount it.
+        The only public source for worker and GPU topology. num_nodes includes
+        the Ray head. For sft, osft, and lora_sft, num_nodes must be 1.
+        SFT/OSFT map gpus_per_node to local torchrun processes. LoRA SFT
+        uses one GPU unless enable_model_splitting=true; it does not launch
+        distributed workers. For lora_grpo with the verl backend,
+        the head is GPU-free and each of the num_nodes minus one workers receives
+        gpus_per_node GPUs. For lora_grpo, cpus_per_node and memory_per_node
+        describe each worker; its head uses 4 CPUs and 32Gi. Algorithm
+        parameters cannot override GPU or node counts. For multi-node requests,
+        every referenced PVC must support ReadWriteMany access because Ray head
+        and worker pods mount it.
       properties:
         num_nodes:
           type: integer

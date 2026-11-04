@@ -3,30 +3,45 @@
 from __future__ import annotations
 
 import json
+import shlex
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from threading import Event, Lock
+from threading import Barrier
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from codeflare_sdk import RayJob
+from codeflare_sdk.common.kubernetes_cluster import auth as codeflare_auth
+from codeflare_sdk.ray.rayjobs.config import build_ray_cluster_spec
 from codeflare_sdk.vendored.python_client.kuberay_job_api import RayjobApi
 from fastapi import Request
 from fastapi.testclient import TestClient
 from kubernetes import client, config
 from kubernetes.client.exceptions import ApiException
 
-from training_service import jobs, kubernetes_client
+from training_service import jobs, kubernetes_client, ray_entrypoint
 from training_service import jobs as submission
+from training_service.algorithm_parameters import validate_algorithm_parameters
 from training_service.auth import CallerIdentity
 from training_service.authorization import ProjectPermission
 from training_service.contract import load_contract
 from training_service.errors import ApiError
 from training_service.main import create_app
-from training_service.ray_entrypoint import _dataset_format
+from training_service.ray_entrypoint import _dataset_format, get_backend
 from training_service_api.models.create_job_request import CreateJobRequest
 from training_service_api.models.error_response import ErrorResponse
+
+
+@pytest.fixture(autouse=True)
+def approved_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Catalog transport/schema enforcement is covered independently in test_discovery.
+    monkeypatch.setattr(
+        submission,
+        "read_algorithm_catalog",
+        lambda _api, _image: dict.fromkeys(("sft", "osft", "lora_sft", "lora_grpo"), {}),
+    )
 
 
 def _sample(name: str = "pvc_inputs_output") -> CreateJobRequest:
@@ -113,6 +128,80 @@ def test_omitted_queue_is_not_invented_in_receipt() -> None:
     assert "queue_name" not in response.json()
 
 
+def test_rayjob_name_limit_accounts_for_kuberay_generated_volume_name() -> None:
+    submitter = RecordingSubmitter()
+    http = TestClient(create_app(FakeAuthenticator(), FakeAuthorizer(), submitter))
+    payload = _sample().model_dump(mode="json", exclude_unset=True)
+    payload["name"] = "a" * 34
+    assert len("kube-rbac-proxy-config-" + payload["name"] + "-abcde") == 63
+    accepted = http.post(
+        "/api/v1/projects/team-alpha/training-jobs",
+        json=payload,
+        headers={"Authorization": "Bearer caller-token"},
+    )
+    assert accepted.status_code == 202
+    payload["name"] += "a"
+    rejected = http.post(
+        "/api/v1/projects/team-alpha/training-jobs",
+        json=payload,
+        headers={"Authorization": "Bearer caller-token"},
+    )
+    assert rejected.status_code == 422
+    assert rejected.json()["message"] == "name must be at most 34 characters."
+    assert len(submitter.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "change,expected",
+    [
+        ("missing_name", "Missing required field: name."),
+        ("extra_model_field", "Unsupported field: model.secret_ref."),
+        ("wrong_resource_type", "resources.num_nodes must be an integer."),
+        ("unknown_parameter", "Unsupported lora_sft parameter: lora_rank."),
+    ],
+)
+def test_submission_errors_identify_safe_field_and_reason(change: str, expected: str) -> None:
+    payload = _sample().model_dump(mode="json", exclude_unset=True)
+    if change == "missing_name":
+        del payload["name"]
+    elif change == "extra_model_field":
+        payload["model"]["secret_ref"] = "do-not-echo-this-value"
+    elif change == "wrong_resource_type":
+        payload["resources"]["num_nodes"] = "two"
+    else:
+        payload["algorithm"]["parameters"]["lora_rank"] = 8
+    submitter = (
+        submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")
+        if change == "unknown_parameter"
+        else RecordingSubmitter()
+    )
+    response = TestClient(create_app(FakeAuthenticator(), FakeAuthorizer(), submitter)).post(
+        "/api/v1/projects/team-alpha/training-jobs",
+        json=payload,
+        headers={"Authorization": "Bearer caller-token"},
+    )
+    assert response.status_code == 422
+    assert response.json()["message"] == expected
+    assert "do-not-echo-this-value" not in response.text
+
+
+@pytest.mark.parametrize(
+    "algorithm,parameters,expected",
+    [
+        ("osft", {}, "Missing required osft parameter: unfreeze_rank_ratio."),
+        ("lora_sft", {"num_epochs": "three"}, "lora_sft.num_epochs must be an integer."),
+        ("lora_sft", {"learning_rate": 0}, "lora_sft.learning_rate must be greater than 0."),
+    ],
+)
+def test_algorithm_parameter_errors_explain_the_constraint(
+    algorithm: str, parameters: dict[str, Any], expected: str
+) -> None:
+    with pytest.raises(ApiError) as raised:
+        validate_algorithm_parameters(algorithm, parameters)
+    assert raised.value.status_code == 422
+    assert raised.value.message == expected
+
+
 def test_post_denied_or_unauthenticated_never_calls_submitter() -> None:
     payload = _sample().model_dump(mode="json", exclude_unset=True)
     submitter = RecordingSubmitter()
@@ -157,7 +246,7 @@ def test_invalid_submission_uses_documented_error_envelope(
 
 
 @pytest.mark.parametrize("advanced_field", ["secret_ref", "lora_rank"])
-def test_advanced_credential_and_algorithm_fields_are_out_of_basic_scope(
+def test_unrecognized_credential_and_algorithm_fields_are_rejected(
     advanced_field: str,
 ) -> None:
     payload = _sample().model_dump(mode="json", exclude_unset=True)
@@ -170,7 +259,7 @@ def test_advanced_credential_and_algorithm_fields_are_out_of_basic_scope(
         create_app(
             FakeAuthenticator(),
             FakeAuthorizer(),
-            submission.CodeFlareJobBackend("quay.io/example/ray:2.55.1"),
+            submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0"),
         )
     ).post(
         "/api/v1/projects/team-alpha/training-jobs",
@@ -261,7 +350,7 @@ class FakeRayJob:
         self.instances.append(self)
 
     def submit(self) -> str:
-        self.client_at_submit = submission.codeflare_auth.api_client
+        self.client_at_submit = self.kwargs["api_client"]
         if self.error is not None:
             raise self.error
         return str(self.kwargs["job_name"])
@@ -274,14 +363,6 @@ def _mock_sdk(monkeypatch: pytest.MonkeyPatch) -> FakeCoreApi:
     monkeypatch.setattr(submission, "_caller_api_client", FakeApiClient)
     monkeypatch.setattr(submission.client, "CoreV1Api", lambda api_client: core)
     monkeypatch.setattr(submission, "_MetadataRayJob", FakeRayJob)
-    monkeypatch.setattr(submission.codeflare_auth, "api_client", None)
-    monkeypatch.setattr(submission.codeflare_auth, "config_path", None)
-
-    def set_api_client(api_client: FakeApiClient) -> None:
-        submission.codeflare_auth.api_client = api_client
-        submission.codeflare_auth.config_path = "custom"
-
-    monkeypatch.setattr(submission.codeflare_auth, "set_api_client", set_api_client)
     return core
 
 
@@ -290,7 +371,7 @@ def test_pvc_submission_maps_resources_and_retains_only_safe_payload(
 ) -> None:
     core = _mock_sdk(monkeypatch)
     body = _sample()
-    identifier = submission.CodeFlareJobBackend("quay.io/example/ray:2.55.1")._submit_sync(
+    identifier = submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")._submit_sync(
         "team-alpha", body, CallerIdentity("alice", None, ()), "caller-token"
     )
     assert identifier == body.name
@@ -302,15 +383,13 @@ def test_pvc_submission_maps_resources_and_retains_only_safe_payload(
     kwargs = FakeRayJob.instances[0].kwargs
     assert kwargs["namespace"] == "team-alpha"
     assert kwargs["local_queue"] == body.queue_name
-    assert "api_client" not in kwargs
+    assert kwargs["api_client"].token == "caller-token"
     assert FakeRayJob.instances[0].client_at_submit.token == "caller-token"
-    assert submission.codeflare_auth.api_client is None
-    assert submission.codeflare_auth.config_path is None
     cluster = kwargs["cluster_config"]
-    assert cluster.image == "quay.io/example/ray:2.55.1"
-    assert cluster.num_workers == 1
-    assert cluster.head_accelerators == {"nvidia.com/gpu": 4}
-    assert cluster.worker_accelerators == {"nvidia.com/gpu": 4}
+    assert cluster.image == "quay.io/example/ray:2.58.0"
+    assert cluster.num_workers == 0
+    assert cluster.head_extended_resource_requests == {"nvidia.com/gpu": 1}
+    assert cluster.worker_extended_resource_requests == {"nvidia.com/gpu": 1}
     assert len(cluster.volumes) == 3
     assert kwargs["annotations"]["training.rhoai.io/submitted-by"] == "alice"
     assert json.loads(kwargs["annotations"]["training.rhoai.io/submission"]) == body.model_dump(
@@ -324,7 +403,10 @@ def test_multinode_pvc_requires_read_write_many(monkeypatch: pytest.MonkeyPatch)
     core = _mock_sdk(monkeypatch)
     core.pvc_access_modes["training-data"] = ["ReadWriteOnce"]
     body = _sample()
-    submitter = submission.CodeFlareJobBackend("quay.io/example/ray:2.55.1")
+    body.algorithm.name = "lora_grpo"
+    body.algorithm.parameters = {}
+    body.resources.num_nodes = 2
+    submitter = submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")
 
     with pytest.raises(ApiError) as raised:
         submitter._submit_sync("team-alpha", body, CallerIdentity("alice", None, ()), "token")
@@ -332,7 +414,7 @@ def test_multinode_pvc_requires_read_write_many(monkeypatch: pytest.MonkeyPatch)
     assert raised.value.code == "validation_error"
     assert FakeRayJob.instances == []
 
-    body.resources.num_nodes = 1
+    core.pvc_access_modes["training-data"] = ["ReadWriteMany"]
     assert (
         submitter._submit_sync("team-alpha", body, CallerIdentity("alice", None, ()), "token")
         == body.name
@@ -359,15 +441,15 @@ def test_positive_fractional_cpu_request_is_valid() -> None:
 def test_configured_image_is_embedded_in_rayjob_head_and_workers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    image = "quay.io/example/ray:2.55.1"
+    image = "quay.io/example/ray:2.58.0"
     _mock_sdk(monkeypatch)
     submission.CodeFlareJobBackend(image)._submit_sync(
         "team-alpha", _sample(), CallerIdentity("alice", None, ()), "caller-token"
     )
     cluster = FakeRayJob.instances[0].kwargs["cluster_config"]
     assert cluster.image == image
-    spec = cluster.build_ray_cluster_spec("pvc-training-cluster")
-    assert spec["rayVersion"] == "2.55.1"
+    spec = build_ray_cluster_spec(cluster, "pvc-training-cluster")
+    assert spec["rayVersion"] == "2.58.0"
     assert spec["headGroupSpec"]["template"].spec.containers[0].image == image
     assert spec["workerGroupSpecs"][0]["template"].spec.containers[0].image == image
 
@@ -379,12 +461,14 @@ def test_sdk_submission_metadata_and_topology_are_readable(
     core = _mock_sdk(monkeypatch)
     payload = _sample().model_dump(mode="json", exclude_unset=True)
     payload["resources"]["num_nodes"] = num_nodes
+    if num_nodes > 1:
+        payload["algorithm"] = {"name": "lora_grpo"}
     authorizer = FakeAuthorizer()
     http = TestClient(
         create_app(
             FakeAuthenticator(),
             authorizer,
-            submission.CodeFlareJobBackend("quay.io/example/ray:2.55.1"),
+            submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0"),
         )
     )
     headers = {"Authorization": "Bearer caller-token"}
@@ -396,7 +480,7 @@ def test_sdk_submission_metadata_and_topology_are_readable(
     kwargs = FakeRayJob.instances[0].kwargs
     with client.ApiClient() as serializer:
         cluster = serializer.sanitize_for_serialization(
-            kwargs["cluster_config"].build_ray_cluster_spec("pvc-training-cluster")
+            build_ray_cluster_spec(kwargs["cluster_config"], "pvc-training-cluster")
         )
     record = {
         "metadata": {
@@ -435,7 +519,11 @@ def test_sdk_submission_metadata_and_topology_are_readable(
     assert response.status_code == 200
     assert response.json()["submission"] == payload
     assert response.json()["submitted_by"] == "alice"
-    assert response.json()["resources"] == payload["resources"]
+    if num_nodes == 1:
+        assert response.json()["resources"] == payload["resources"]
+    else:
+        # A GPU-free head and GPU workers are heterogeneous; PR #8 omits resources.
+        assert "resources" not in response.json()
     assert authorizer.calls == [
         ProjectPermission("ray.io", "rayjobs", "create"),
         ProjectPermission("ray.io", "rayjobs", "list"),
@@ -458,7 +546,7 @@ def test_omitted_basic_options_use_contract_defaults(monkeypatch: pytest.MonkeyP
     payload["algorithm"].pop("parameters")
     body = CreateJobRequest.model_validate(payload)
 
-    submission.CodeFlareJobBackend("quay.io/example/ray:2.55.1")._submit_sync(
+    submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")._submit_sync(
         "team-alpha", body, CallerIdentity("alice", None, ()), "caller-token"
     )
 
@@ -468,7 +556,7 @@ def test_omitted_basic_options_use_contract_defaults(monkeypatch: pytest.MonkeyP
     assert cluster.num_workers == 0
     assert cluster.head_cpu_requests == "8"
     assert cluster.head_memory_requests == "32Gi"
-    assert cluster.head_accelerators == {"nvidia.com/gpu": 1}
+    assert cluster.head_extended_resource_requests == {"nvidia.com/gpu": 1}
     assert len(cluster.volumes) == 2
     assert entry_config["parameters"] == {}
     assert "output" not in entry_config
@@ -489,7 +577,7 @@ def test_secret_backed_locators_use_caller_client_and_mount_references_only(
 ) -> None:
     core = _mock_sdk(monkeypatch)
     body = _sample(example)
-    submission.CodeFlareJobBackend("quay.io/example/ray:2.55.1")._submit_sync(
+    submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")._submit_sync(
         "team-alpha", body, CallerIdentity("alice", None, ()), "caller-token"
     )
     assert [name for name, _ in core.secret_reads] == expected_reads
@@ -503,7 +591,7 @@ def test_secret_backed_locators_use_caller_client_and_mount_references_only(
 async def test_sdk_conflict_maps_to_documented_409(monkeypatch: pytest.MonkeyPatch) -> None:
     _mock_sdk(monkeypatch)
     FakeRayJob.error = ApiException(status=409, reason="Already Exists")
-    submitter = submission.CodeFlareJobBackend("quay.io/example/ray:2.55.1")
+    submitter = submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")
     with pytest.raises(ApiError) as raised:
         await submitter.submit(
             "team-alpha", _sample(), CallerIdentity("alice", None, ()), "caller-token"
@@ -513,8 +601,6 @@ async def test_sdk_conflict_maps_to_documented_409(monkeypatch: pytest.MonkeyPat
     assert raised.value.message == (
         "Training job 'pvc-training' already exists in project 'team-alpha'."
     )
-    assert submission.codeflare_auth.api_client is None
-    assert submission.codeflare_auth.config_path is None
 
 
 @pytest.mark.parametrize(
@@ -548,7 +634,7 @@ def test_missing_submission_resources_identify_reference_and_project(
         create_app(
             FakeAuthenticator(),
             FakeAuthorizer(),
-            submission.CodeFlareJobBackend("quay.io/example/ray:2.55.1"),
+            submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0"),
         )
     )
     response = http.post(
@@ -566,60 +652,35 @@ def test_missing_submission_resources_identify_reference_and_project(
     assert FakeRayJob.instances == []
 
 
-def test_sdk_auth_is_restored_when_client_verification_fails(
+def test_submission_does_not_mutate_process_global_sdk_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _mock_sdk(monkeypatch)
     previous_client = FakeApiClient("previous-caller")
-    submission.codeflare_auth.api_client = previous_client
-    submission.codeflare_auth.config_path = "previous-config"
-
-    def reject_client(api_client: FakeApiClient) -> None:
-        submission.codeflare_auth.api_client = api_client
-        submission.codeflare_auth.config_path = "custom"
-        raise ApiException(status=401, reason="Invalid caller token")
-
-    monkeypatch.setattr(submission.codeflare_auth, "set_api_client", reject_client)
-    with pytest.raises(ApiException) as raised:
-        with submission._sdk_client_scope(FakeApiClient("invalid-caller")):
-            pytest.fail("SDK scope must not be entered after verification fails")
-
-    assert raised.value.status == 401
-    assert submission.codeflare_auth.api_client is previous_client
-    assert submission.codeflare_auth.config_path == "previous-config"
+    monkeypatch.setattr(codeflare_auth, "api_client", previous_client)
+    submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")._submit_sync(
+        "team-alpha", _sample(), CallerIdentity("alice", None, ()), "caller-token"
+    )
+    assert FakeRayJob.instances[0].client_at_submit.token == "caller-token"
+    assert codeflare_auth.api_client is previous_client
 
 
 def test_parallel_submissions_keep_each_callers_sdk_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _mock_sdk(monkeypatch)
-    first_submitting = Event()
-    second_prepared = Event()
-    release_first = Event()
-    preparation_lock = Lock()
-    prepared = 0
-    original_storage_plan = submission._storage_plan
-
-    def storage_plan(*args: Any, **kwargs: Any) -> Any:
-        nonlocal prepared
-        result = original_storage_plan(*args, **kwargs)
-        with preparation_lock:
-            prepared += 1
-            if prepared == 2:
-                second_prepared.set()
-        return result
+    barrier = Barrier(2)
+    previous_client = FakeApiClient("previous-caller")
+    monkeypatch.setattr(codeflare_auth, "api_client", previous_client)
 
     def controlled_submit(job: FakeRayJob) -> str:
-        job.client_at_submit = submission.codeflare_auth.api_client
-        if job.client_at_submit.token == "caller-a":
-            first_submitting.set()
-            assert release_first.wait(5)
-            assert submission.codeflare_auth.api_client is job.client_at_submit
+        job.client_at_submit = job.kwargs["api_client"]
+        barrier.wait(timeout=5)
+        assert codeflare_auth.api_client is previous_client
         return str(job.kwargs["job_name"])
 
-    monkeypatch.setattr(submission, "_storage_plan", storage_plan)
     monkeypatch.setattr(FakeRayJob, "submit", controlled_submit)
-    submitters = [submission.CodeFlareJobBackend("quay.io/example/ray:2.55.1") for _ in range(2)]
+    submitters = [submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0") for _ in range(2)]
 
     def submit(index: int, name: str, token: str) -> str:
         body = _sample()
@@ -630,23 +691,12 @@ def test_parallel_submissions_keep_each_callers_sdk_client(
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(submit, 0, "job-a", "caller-a")
-        try:
-            assert first_submitting.wait(5)
-            second = pool.submit(submit, 1, "job-b", "caller-b")
-            assert second_prepared.wait(5)
-            assert submission.codeflare_auth.api_client.token == "caller-a"
-            assert not second.done()
-        finally:
-            release_first.set()
+        second = pool.submit(submit, 1, "job-b", "caller-b")
         assert first.result(timeout=5) == "job-a"
         assert second.result(timeout=5) == "job-b"
 
-    assert [job.client_at_submit.token for job in FakeRayJob.instances] == [
-        "caller-a",
-        "caller-b",
-    ]
-    assert submission.codeflare_auth.api_client is None
-    assert submission.codeflare_auth.config_path is None
+    assert {job.client_at_submit.token for job in FakeRayJob.instances} == {"caller-a", "caller-b"}
+    assert codeflare_auth.api_client is previous_client
 
 
 @pytest.mark.parametrize(
@@ -865,3 +915,550 @@ def test_alpaca_jsonl_uses_training_hub_alpaca_format(tmp_path: Path) -> None:
     assert _dataset_format(str(path)) == "alpaca"
     path.write_text('{"messages":[]}\n', encoding="utf-8")
     assert _dataset_format(str(path)) is None
+
+
+_EXPECTED_TH_BACKENDS = {
+    "sft": "instructlab-training",
+    "osft": "mini-trainer",
+    "lora_sft": "unsloth",
+    "lora_grpo": "verl",
+}
+
+
+_OSFT_EXAMPLE_PARAMETERS = {
+    "unfreeze_rank_ratio": 0.1,
+    "max_seq_len": 512,
+    "max_tokens_per_gpu": 512,
+    "effective_batch_size": 4,
+    "learning_rate": 1e-5,
+}
+
+
+def test_all_post_contract_examples_match_algorithm_validation() -> None:
+    examples = load_contract()["paths"]["/projects/{project}/training-jobs"]["post"]["requestBody"][
+        "content"
+    ]["application/json"]["examples"]
+    for name in examples:
+        submission._validate_request(_sample(name))
+
+
+def test_parameter_schemas_match_registered_training_backends() -> None:
+    schemas = load_contract()["components"]["schemas"]["AlgorithmSpec"]["x-parameter-schemas"]
+    assert set(schemas) == set(ray_entrypoint._BACKENDS)
+    for name in schemas:
+        assert get_backend(name).name == name
+    with pytest.raises(ValueError, match="Unsupported Training Hub algorithm"):
+        get_backend("unreviewed_algorithm")
+
+
+@pytest.mark.parametrize("algorithm", ["sft", "osft", "lora_sft"])
+def test_head_local_algorithms_reject_unused_ray_workers_before_sdk(
+    monkeypatch: pytest.MonkeyPatch, algorithm: str
+) -> None:
+    core = _mock_sdk(monkeypatch)
+    body = _sample()
+    body.algorithm.name = algorithm
+    body.algorithm.parameters = _OSFT_EXAMPLE_PARAMETERS if algorithm == "osft" else {}
+    body.resources.num_nodes = 2
+    with pytest.raises(ApiError, match="num_nodes=1") as raised:
+        submission.CodeFlareJobBackend("image")._submit_sync(
+            "team-alpha", body, CallerIdentity("alice", None, ()), "caller-token"
+        )
+    assert raised.value.status_code == 422
+    assert core.pvc_reads == []
+    assert FakeRayJob.instances == []
+
+
+def test_lora_multi_gpu_requires_explicit_model_splitting() -> None:
+    body = _sample()
+    body.resources.gpus_per_node = 2
+    with pytest.raises(ApiError, match="enable_model_splitting"):
+        submission._validate_request(body)
+    body.algorithm.parameters["enable_model_splitting"] = True
+    resources, parameters = submission._validate_request(body)
+    assert resources.gpus_per_node == 2
+    assert parameters["enable_model_splitting"] is True
+
+
+def test_catalog_disables_submission_before_storage_or_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
+    core = _mock_sdk(monkeypatch)
+    monkeypatch.setattr(submission, "read_algorithm_catalog", lambda _api, _image: {})
+    with pytest.raises(ApiError, match="not enabled") as raised:
+        submission.CodeFlareJobBackend("image")._submit_sync(
+            "team-alpha", _sample(), CallerIdentity("alice", None, ()), "caller-token"
+        )
+    assert raised.value.status_code == 422
+    assert core.pvc_reads == []
+    assert FakeRayJob.instances == []
+
+
+def test_conflicting_lora_precision_requires_explicit_bf16_false() -> None:
+    assert validate_algorithm_parameters("lora_sft", {"fp16": True, "bf16": False}) == {
+        "fp16": True,
+        "bf16": False,
+    }
+
+
+@pytest.mark.parametrize("algorithm", ["sft", "osft", "lora_sft", "lora_grpo"])
+@pytest.mark.parametrize(
+    "parameter",
+    ["nproc_per_node", "nnodes", "node_rank", "backend", "callbacks", "checkpoint_storage"],
+)
+def test_algorithm_parameters_cannot_override_platform_or_python_configuration(
+    algorithm: str, parameter: str
+) -> None:
+    values = dict(_OSFT_EXAMPLE_PARAMETERS) if algorithm == "osft" else {}
+    values[parameter] = "caller-controlled"
+    with pytest.raises(ApiError) as raised:
+        validate_algorithm_parameters(algorithm, values)
+    assert raised.value.status_code == 422
+
+
+def test_real_sdk_submits_with_caller_client_and_configured_ray_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configuration = client.Configuration()
+    configuration.api_key["authorization"] = "Bearer caller-token"
+    caller_client = submission._CallerApiClient(configuration)
+    previous_client = client.ApiClient(client.Configuration())
+    monkeypatch.setattr(codeflare_auth, "api_client", previous_client)
+    monkeypatch.setattr(submission, "_caller_api_client", lambda _token: caller_client)
+    monkeypatch.setattr(submission.client, "CoreV1Api", lambda _api_client=None: FakeCoreApi())
+    created: list[dict[str, Any]] = []
+
+    def record_create(api: client.CustomObjectsApi, **kwargs: Any) -> dict[str, Any]:
+        assert api.api_client is caller_client
+        assert kwargs["namespace"] == "team-alpha"
+        created.append(kwargs["body"])
+        return kwargs["body"]
+
+    monkeypatch.setattr(client.CustomObjectsApi, "create_namespaced_custom_object", record_create)
+    image = "quay.io/modh/ray:2.58.0-py312-cu129-th081"
+    identifier = submission.CodeFlareJobBackend(image)._submit_sync(
+        "team-alpha", _sample(), CallerIdentity("alice", None, ()), "caller-token"
+    )
+
+    assert identifier == "pvc-training"
+    assert len(created) == 1
+    assert created[0]["metadata"]["annotations"]["training.rhoai.io/submitted-by"] == "alice"
+    spec = created[0]["spec"]["rayClusterSpec"]
+    assert spec["rayVersion"] == "2.58.0"
+    assert spec["headGroupSpec"]["template"].spec.containers[0].image == image
+    assert spec["workerGroupSpecs"][0]["template"].spec.containers[0].image == image
+    assert codeflare_auth.api_client is previous_client
+
+    with pytest.raises(ValueError, match="Cluster config image") as raised:
+        submission.CodeFlareJobBackend("quay.io/modh/ray:2.55.1-py312-cu129-th081")._submit_sync(
+            "team-alpha", _sample(), CallerIdentity("alice", None, ()), "caller-token"
+        )
+    assert (
+        submission._map_backend_error(raised.value, "team-alpha", "pvc-training").status_code == 503
+    )
+    assert len(created) == 1
+
+
+@pytest.mark.parametrize(
+    "algorithm,parameters",
+    [
+        (
+            "sft",
+            {
+                "max_seq_len": 512,
+                "max_tokens_per_gpu": 512,
+                "effective_batch_size": 4,
+                "learning_rate": 1e-5,
+                "num_epochs": 1,
+            },
+        ),
+        (
+            "osft",
+            {**_OSFT_EXAMPLE_PARAMETERS, "lr_scheduler_kwargs": {"num_cycles": "1"}},
+        ),
+        (
+            "lora_sft",
+            {"lora_r": 16, "lora_alpha": 32, "num_epochs": 1, "max_grad_norm": 0.3},
+        ),
+        (
+            "lora_grpo",
+            {
+                "num_iterations": 5,
+                "group_size": 4,
+                "n_train": 200,
+                "n_val": 10,
+                "lora_r": 16,
+                "lora_alpha": 8,
+                "learning_rate": 1e-5,
+                "gpu_memory_utilization": 0.2,
+                "param_offload": True,
+                "optimizer_offload": False,
+                "layered_summon": True,
+                "language_model_only": False,
+            },
+        ),
+    ],
+)
+def test_example_algorithm_parameters_are_preserved(
+    algorithm: str, parameters: dict[str, Any]
+) -> None:
+    assert validate_algorithm_parameters(algorithm, parameters) == parameters
+
+
+@pytest.mark.parametrize(
+    "algorithm,parameters",
+    [
+        ("other", {}),
+        ("sft", {"max_seq_len": True}),
+        ("sft", {"learning_rate": float("nan")}),
+        ("sft", {"is_pretraining": True}),
+        ("sft", {"beta1": 0.9}),
+        ("sft", {"block_size": 512}),
+        ("osft", {"unfreeze_rank_ratio": 0.1}),
+        ("osft", {**_OSFT_EXAMPLE_PARAMETERS, "unfreeze_rank_ratio": 1.2}),
+        ("osft", {**_OSFT_EXAMPLE_PARAMETERS, "lr_scheduler_kwargs": {"num_cycles": 1}}),
+        (
+            "osft",
+            {
+                **_OSFT_EXAMPLE_PARAMETERS,
+                "is_pretraining": True,
+                "block_size": 512,
+                "unmask_messages": True,
+            },
+        ),
+        ("lora_sft", {"lora_r": "16"}),
+        ("lora_sft", {"lora_r": 16, "lora_rank": 16}),
+        ("lora_sft", {"load_in_4bit": True, "load_in_8bit": True}),
+        ("lora_sft", {"max_grad_norm": 0}),
+        ("lora_sft", {"flash_attention": True}),
+        ("lora_sft", {"assistant_only_loss": False}),
+        ("lora_sft", {"eval_steps": 5}),
+        ("lora_sft", {"fp16": True}),
+        ("lora_sft", {"weight_decay": -0.1}),
+        ("lora_sft", {"seed": "1"}),
+        ("lora_sft", {"use_rslora": "true"}),
+        ("lora_sft", {"tf32": True}),
+        ("lora_grpo", {"tasks_per_iteration": 10}),
+        ("lora_grpo", {"gpu_memory_utilization": 1.0}),
+        ("lora_grpo", {"n_gpus": 4}),
+        ("lora_grpo", {"max_lora_rank": 8}),
+        ("lora_grpo", {"temperature": 0.7}),
+        ("lora_grpo", {"concurrency": 4}),
+        ("lora_grpo", {"param_offload": "true"}),
+        ("lora_grpo", {"target_modules": ["q_proj"]}),
+        ("lora_grpo", {"max_grad_norm": 0.1}),
+    ],
+)
+def test_invalid_algorithm_parameters_get_422(algorithm: str, parameters: dict[str, Any]) -> None:
+    with pytest.raises(ApiError) as raised:
+        validate_algorithm_parameters(algorithm, parameters)
+    assert raised.value.status_code == 422
+    assert raised.value.code == "validation_error"
+
+
+def test_osft_integral_json_numbers_are_normalized_for_training_hub_float_checks() -> None:
+    parameters = {**_OSFT_EXAMPLE_PARAMETERS, "unfreeze_rank_ratio": 1}
+    mapped = validate_algorithm_parameters("osft", parameters)
+    assert mapped["unfreeze_rank_ratio"] == 1.0
+    assert type(mapped["unfreeze_rank_ratio"]) is float
+    assert parameters["unfreeze_rank_ratio"] == 1
+
+
+@pytest.mark.parametrize("algorithm", ["sft", "osft", "lora_sft", "lora_grpo"])
+def test_every_exposed_algorithm_override_reaches_training_hub(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, algorithm: str
+) -> None:
+    schemas = load_contract()["components"]["schemas"]["AlgorithmSpec"]["x-parameter-schemas"]
+    properties = schemas[algorithm]["properties"]
+    values: dict[str, Any] = {}
+    for key, spec in properties.items():
+        if "enum" in spec:
+            values[key] = spec["enum"][0]
+        elif spec["type"] == "boolean":
+            values[key] = key == "is_pretraining"
+        elif spec["type"] == "integer":
+            values[key] = max(spec.get("minimum", 0), 1)
+        elif spec["type"] == "number":
+            values[key] = 0.5
+        elif spec["type"] == "array":
+            values[key] = ["q_proj"]
+        elif spec["type"] == "object":
+            values[key] = {"num_cycles": "1"}
+        else:
+            values[key] = "value"
+
+    mapped = validate_algorithm_parameters(algorithm, values)
+    calls: list[dict[str, Any]] = []
+
+    def factory(name: str, backend: str) -> Any:
+        assert name == algorithm
+        assert backend == _EXPECTED_TH_BACKENDS[algorithm]
+        return SimpleNamespace(train=lambda **kw: calls.append(kw))
+
+    monkeypatch.setitem(sys.modules, "training_hub", SimpleNamespace(create_algorithm=factory))
+    ray_entrypoint._run_training(algorithm, "/model", "/data.jsonl", tmp_path, mapped, 4, 1)
+
+    assert len(calls) == 1
+    for key, value in mapped.items():
+        assert calls[0][key] == value
+
+
+@pytest.mark.parametrize(
+    "algorithm,parameters,gpus,nodes",
+    [
+        ("sft", {"max_tokens_per_gpu": 512}, 1, 1),
+        ("osft", _OSFT_EXAMPLE_PARAMETERS, 1, 1),
+        ("lora_sft", {"lora_r": 16, "lora_alpha": 32}, 1, 1),
+        ("lora_grpo", {"group_size": 4, "lora_r": 16}, 4, 2),
+    ],
+)
+def test_sdk_submission_dispatches_example_algorithm_and_gpu_topology(
+    monkeypatch: pytest.MonkeyPatch,
+    algorithm: str,
+    parameters: dict[str, Any],
+    gpus: int,
+    nodes: int,
+) -> None:
+    core = _mock_sdk(monkeypatch)
+    configuration: dict[str, Any] = {}
+    monkeypatch.setattr(
+        submission,
+        "_entrypoint",
+        lambda value: configuration.update(value) or "python -c 'pass'",
+    )
+    payload = _sample().model_dump(mode="json", exclude_unset=True)
+    payload["algorithm"] = {"name": algorithm, "parameters": parameters}
+    payload["resources"]["num_nodes"] = nodes
+    payload["resources"]["gpus_per_node"] = gpus
+    if algorithm == "lora_grpo":
+        payload["model"]["uri"] = "hf://hf-secret-token/Qwen/Qwen3-4B"
+        payload["dataset"]["uri"] = "hf://hf-secret-token/Agent-Ark/Toucan-1.5M"
+    body = CreateJobRequest.model_validate(payload)
+
+    identifier = submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")._submit_sync(
+        "team-alpha", body, CallerIdentity("alice", None, ()), "caller-token"
+    )
+
+    assert identifier == "pvc-training"
+    assert configuration["algorithm"] == algorithm
+    assert configuration["parameters"] == parameters
+    assert configuration["gpus_per_node"] == gpus
+    assert configuration["num_workers"] == nodes - 1
+    cluster = FakeRayJob.instances[0].kwargs["cluster_config"]
+    assert cluster.head_extended_resource_requests == (
+        {} if algorithm == "lora_grpo" else {"nvidia.com/gpu": gpus}
+    )
+    assert cluster.worker_extended_resource_requests == {"nvidia.com/gpu": gpus}
+    assert cluster.num_workers == nodes - 1
+    if algorithm == "lora_grpo":
+        assert core.secret_reads == [("hf-secret-token", "team-alpha")]
+        assert cluster.envs["HF_TOKEN_PATH"] == "/mnt/training-api/credentials/0/HF_TOKEN"
+        assert cluster.head_cpu_requests == "4"
+        assert cluster.head_memory_requests == "32Gi"
+        assert cluster.worker_cpu_requests == "16"
+        assert cluster.worker_memory_requests == "64Gi"
+        built = build_ray_cluster_spec(cluster, "grpo-toucan-cluster")
+        head = built["headGroupSpec"]["template"].spec.containers[0]
+        worker = built["workerGroupSpecs"][0]["template"].spec.containers[0]
+        assert "nvidia.com/gpu" not in head.resources.requests
+        assert worker.resources.requests["nvidia.com/gpu"] == 4
+        assert any(env.name == "HF_TOKEN_PATH" for env in head.env)
+        assert any(env.name == "HF_TOKEN_PATH" for env in worker.env)
+        assert any(
+            mount.mount_path == "/mnt/training-api/credentials/0" for mount in head.volume_mounts
+        )
+        assert any(
+            mount.mount_path == "/mnt/training-api/credentials/0" for mount in worker.volume_mounts
+        )
+        assert "opaque-value" not in str(FakeRayJob.instances[0].kwargs)
+    else:
+        assert "HF_TOKEN_PATH" not in cluster.envs
+
+
+@pytest.mark.parametrize(
+    "algorithm,parameters",
+    [
+        ("sft", {"max_tokens_per_gpu": 512}),
+        ("osft", _OSFT_EXAMPLE_PARAMETERS),
+        ("lora_sft", {"lora_r": 16}),
+        ("lora_grpo", {"group_size": 4, "lora_r": 16}),
+    ],
+)
+def test_http_post_accepts_adapted_ray_example_parameters(
+    monkeypatch: pytest.MonkeyPatch, algorithm: str, parameters: dict[str, Any]
+) -> None:
+    _mock_sdk(monkeypatch)
+    payload = _sample().model_dump(mode="json", exclude_unset=True)
+    payload["algorithm"] = {"name": algorithm, "parameters": parameters}
+    if algorithm == "lora_grpo":
+        payload["model"]["uri"] = "hf://hf-secret-token/Qwen/Qwen3-4B"
+        payload["dataset"]["uri"] = "hf://hf-secret-token/Agent-Ark/Toucan-1.5M"
+        payload["resources"]["gpus_per_node"] = 4
+        payload["resources"]["num_nodes"] = 2
+    else:
+        payload["resources"]["num_nodes"] = 1
+    response = TestClient(
+        create_app(
+            FakeAuthenticator(),
+            FakeAuthorizer(),
+            submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0"),
+        )
+    ).post(
+        "/api/v1/projects/team-alpha/training-jobs",
+        json=payload,
+        headers={"Authorization": "Bearer caller-token"},
+    )
+    assert response.status_code == 202
+    assert response.json()["id"] == "pvc-training"
+
+
+@pytest.mark.parametrize(
+    "algorithm,parameters",
+    [
+        ("osft", {"unfreeze_rank_ratio": 0.1}),
+        ("lora_grpo", {"tasks_per_iteration": 10}),
+    ],
+)
+def test_http_post_rejects_invalid_algorithm_overrides(
+    monkeypatch: pytest.MonkeyPatch, algorithm: str, parameters: dict[str, Any]
+) -> None:
+    _mock_sdk(monkeypatch)
+    payload = _sample().model_dump(mode="json", exclude_unset=True)
+    payload["algorithm"] = {"name": algorithm, "parameters": parameters}
+    response = TestClient(
+        create_app(
+            FakeAuthenticator(),
+            FakeAuthorizer(),
+            submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0"),
+        )
+    ).post(
+        "/api/v1/projects/team-alpha/training-jobs",
+        json=payload,
+        headers={"Authorization": "Bearer caller-token"},
+    )
+    assert response.status_code == 422
+    assert response.json()["code"] == "validation_error"
+    assert FakeRayJob.instances == []
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"resources": {"num_nodes": 1}},
+        {"resources": {"gpus_per_node": 0}},
+        {"algorithm": {"parameters": {"prompt_batch_size": 9, "group_size": 1}}},
+        {"output": {"destination_uri": "s3://checkpoint-storage/bucket/checkpoints/"}},
+        {"model": {"uri": "s3://model-storage/bucket/model/"}},
+        {"dataset": {"uri": "hf://other-secret/Agent-Ark/Toucan-1.5M"}},
+        {"dataset": {"uri": "pvc://training-data/dataset/"}},
+    ],
+)
+def test_invalid_grpo_layout_or_inputs_fail_before_sdk(change: dict[str, Any]) -> None:
+    payload = _sample().model_dump(mode="json", exclude_unset=True)
+    payload["algorithm"] = {"name": "lora_grpo", "parameters": {"group_size": 4}}
+    payload["resources"]["num_nodes"] = 2
+    payload["model"]["uri"] = "hf://hf-secret-token/Qwen/Qwen3-4B"
+    payload["dataset"]["uri"] = "hf://hf-secret-token/Agent-Ark/Toucan-1.5M"
+    for key, fields in change.items():
+        payload[key].update(fields)
+    body = CreateJobRequest.model_validate(payload)
+    with pytest.raises(ApiError) as raised:
+        submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")._submit_sync(
+            "team-alpha", body, CallerIdentity("alice", None, ()), "caller-token"
+        )
+    assert raised.value.status_code == 422
+
+
+@pytest.mark.parametrize("algorithm", ["sft", "osft", "lora_sft", "lora_grpo"])
+def test_entrypoint_selects_training_hub_algorithm_class_and_backend(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, algorithm: str
+) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def record(name: str) -> Any:
+        return lambda **kwargs: calls.append((name, kwargs))
+
+    def factory(name: str, backend: str) -> Any:
+        assert backend == _EXPECTED_TH_BACKENDS[name]
+        return SimpleNamespace(train=record(name))
+
+    monkeypatch.setitem(sys.modules, "training_hub", SimpleNamespace(create_algorithm=factory))
+    monkeypatch.setattr(ray_entrypoint, "_dataset_format", lambda _path: "alpaca")
+    parameters = {"lora_r": 16} if algorithm in {"lora_sft", "lora_grpo"} else {"num_epochs": 1}
+
+    ray_entrypoint._run_training(algorithm, "/model", "/data.jsonl", tmp_path, parameters, 4, 1)
+
+    assert len(calls) == 1
+    name, kwargs = calls[0]
+    assert name == algorithm
+    assert kwargs["model_path"] == "/model"
+    assert kwargs["data_path"] == "/data.jsonl"
+    assert kwargs["ckpt_output_dir"] == str(tmp_path)
+    assert kwargs["lora_r" if algorithm in {"lora_sft", "lora_grpo"} else "num_epochs"]
+    if algorithm in {"sft", "osft"}:
+        assert kwargs["data_output_dir"] == str(tmp_path / "data")
+        assert kwargs["nproc_per_node"] == 4
+        assert kwargs["nnodes"] == 1
+    elif algorithm == "lora_sft":
+        assert kwargs["dataset_type"] == "alpaca"
+    else:
+        assert "backend" not in kwargs
+        assert kwargs["n_gpus"] == 4
+        assert kwargs["nnodes"] == 1
+
+
+def test_grpo_hf_inputs_remain_remote_for_worker_access(tmp_path: Path) -> None:
+    location = {"scheme": "hf", "repository": "Agent-Ark/Toucan-1.5M"}
+    assert ray_entrypoint._input(location, "dataset", tmp_path, remote_hf=True) == (
+        "Agent-Ark/Toucan-1.5M"
+    )
+
+
+@pytest.mark.parametrize("algorithm", ["sft", "lora_grpo"])
+def test_embedded_ray_entrypoint_executes_the_selected_algorithm(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, algorithm: str
+) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def record(name: str) -> Any:
+        return lambda **kwargs: calls.append((name, kwargs))
+
+    def factory(name: str, backend: str) -> Any:
+        assert backend == _EXPECTED_TH_BACKENDS[name]
+        return SimpleNamespace(train=record(name))
+
+    monkeypatch.setitem(sys.modules, "training_hub", SimpleNamespace(create_algorithm=factory))
+    model = tmp_path / "model"
+    dataset = tmp_path / "data.jsonl"
+    dataset.write_text('{"messages": []}\n', encoding="utf-8")
+    if algorithm == "lora_grpo":
+        model_location = {"scheme": "hf", "repository": "Qwen/Qwen3-4B"}
+        dataset_location = {"scheme": "hf", "repository": "Agent-Ark/Toucan-1.5M"}
+    else:
+        model_location = {"scheme": "pvc", "mount_path": str(model)}
+        dataset_location = {"scheme": "pvc", "mount_path": str(dataset)}
+    configuration = {
+        "algorithm": algorithm,
+        "model": model_location,
+        "dataset": dataset_location,
+        "output": {"scheme": "pvc", "mount_path": str(tmp_path / "checkpoints")},
+        "parameters": {"num_iterations": 2} if algorithm == "lora_grpo" else {"num_epochs": 1},
+        "gpus_per_node": 4 if algorithm == "lora_grpo" else 1,
+        "num_workers": 1 if algorithm == "lora_grpo" else 0,
+    }
+
+    command = shlex.split(submission._entrypoint(configuration))
+    assert command[:2] == ["python", "-c"]
+    exec(command[2], {})
+
+    assert len(calls) == 1
+    name, kwargs = calls[0]
+    assert name == algorithm
+    assert kwargs["ckpt_output_dir"] == str(tmp_path / "checkpoints")
+    if algorithm == "lora_grpo":
+        assert kwargs["model_path"] == "Qwen/Qwen3-4B"
+        assert kwargs["data_path"] == "Agent-Ark/Toucan-1.5M"
+        assert kwargs["num_iterations"] == 2
+        assert kwargs["n_gpus"] == 4
+    else:
+        assert kwargs["model_path"] == str(model)
+        assert kwargs["data_path"] == str(dataset)
+        assert kwargs["num_epochs"] == 1

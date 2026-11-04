@@ -25,9 +25,12 @@ class CreateJobRequest(ContractModel):
     Schema: CreateJobRequest in docs/api/openapi.yaml.
     """
 
-    name: Annotated[str, Field(min_length=1, strict=True, max_length=47)] = Field(
+    name: Annotated[str, Field(min_length=1, strict=True, max_length=34)] = Field(
         description=(
-            "DNS-1035-compatible RayJob name; limited to 47 characters by the submission path."
+            "DNS-1035-compatible RayJob name. Limited to 34 characters because "
+            "KubeRay appends a cluster suffix and generates a "
+            "kube-rbac-proxy-config- volume name, which must fit Kubernetes' "
+            "63-character DNS-label limit. "
         ),
         json_schema_extra={"examples": ["llama3-8b-alpaca-lora"]},
     )

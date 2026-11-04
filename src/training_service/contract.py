@@ -33,8 +33,6 @@ def contract_document() -> dict[str, Any]:
         for operation in path.values():
             if isinstance(operation, dict) and operation.get("operationId") in {
                 "estimateTrainingJob",
-                "listAlgorithms",
-                "listQueues",
             }:
                 operation["responses"]["501"] = {
                     "description": "Not implemented in this local scaffold.",

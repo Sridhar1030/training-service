@@ -97,7 +97,7 @@ class BoundedJobClient(JobSubmissionClient):
         return response
 
     async def tail_job_logs(self, job_id: str) -> AsyncIterator[str]:
-        """Harden Ray 2.55's WebSocket transport, which bypasses _do_request."""
+        """Harden Ray 2.58's WebSocket transport, which bypasses _do_request."""
         # ws_connect has no allow_redirects argument. The public trace callback
         # aborts a redirect before a second request, including on the same origin.
         trace = aiohttp.TraceConfig()
@@ -125,7 +125,7 @@ class CodeFlareLogClient(RayJobClient):
     """Use CodeFlare's log API with a bounded, redirect-safe Ray transport."""
 
     def __init__(self, address: str, *, headers: dict[str, str], verify: str | bool = True) -> None:
-        # SDK 0.38 has no transport injection parameter. Initialize its delegate
+        # CodeFlare SDK 0.40 has no transport injection parameter. Initialize its delegate
         # directly so construction cannot issue an unhardened request first.
         self.rayJobClient = BoundedJobClient(address, headers=headers, verify=verify)
 

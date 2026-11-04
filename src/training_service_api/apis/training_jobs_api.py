@@ -275,8 +275,8 @@ async def create_training_job(
                     },
                 },
                 "resources": {
-                    "num_nodes": 2,
-                    "gpus_per_node": 4,
+                    "num_nodes": 1,
+                    "gpus_per_node": 1,
                     "gpu_type": "nvidia.com/gpu",
                     "cpus_per_node": "16",
                     "memory_per_node": "64Gi",

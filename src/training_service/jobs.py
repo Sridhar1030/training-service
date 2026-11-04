@@ -10,26 +10,25 @@ import logging
 import os
 import re
 import shlex
-from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
-from threading import Lock
 from typing import Any, Protocol
 from urllib.parse import unquote, urlsplit
 
 import anyio
 from codeflare_sdk import RayJob
-from codeflare_sdk.common.kubernetes_cluster import auth as codeflare_auth
-from codeflare_sdk.ray.rayjobs.config import ManagedClusterConfig
+from codeflare_sdk.ray.cluster.config import ClusterConfiguration
 from fastapi import Request
 from jsonschema import ValidationError
 from kubernetes import client
 from kubernetes.client.exceptions import ApiException
 from pydantic import ValidationError as ModelValidationError
 
+from training_service.algorithm_parameters import validate_algorithm_parameters
 from training_service.auth import CallerIdentity
 from training_service.contract import component_validator
+from training_service.discovery import read_algorithm_catalog
 from training_service.errors import ApiError
 from training_service.kubernetes_client import (
     TIMEOUT,
@@ -39,6 +38,7 @@ from training_service.kubernetes_client import (
     validate_names,
 )
 from training_service.logs import CodeFlareLogClient, LogClient, logs_not_found, logs_unavailable
+from training_service.ray_entrypoint import get_backend
 from training_service_api.models.create_job_request import CreateJobRequest
 from training_service_api.models.job_backend import JobBackend
 from training_service_api.models.resource_spec import ResourceSpec
@@ -50,12 +50,8 @@ _ANNOTATION_SUBMITTER = "training.rhoai.io/submitted-by"
 _NAME_PATTERN = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 _CPU_PATTERN = re.compile(r"^(?:[1-9][0-9]*|[1-9][0-9]*m|0\.0*[1-9][0-9]*)$")
 _MEMORY_PATTERN = re.compile(r"^[1-9][0-9]*(?:Ki|Mi|Gi|Ti|K|M|G|T)$")
-_BASIC_PARAMETERS = frozenset(
-    {"learning_rate", "num_epochs", "effective_batch_size", "max_seq_len"}
-)
 _GPU_TYPES = frozenset({"nvidia.com/gpu", "amd.com/gpu", "intel.com/gpu"})
 _RAYJOB_CREATE_PATH = "/apis/{group}/{version}/namespaces/{namespace}/{plural}"
-_SDK_AUTH_LOCK = Lock()
 
 
 class _SdkSubmissionError(Exception):
@@ -79,8 +75,7 @@ class _CallerApiClient(client.ApiClient):
             and path_params.get("version") == "v1"
             and path_params.get("plural") == "rayjobs"
         )
-        # CodeFlare's client verification and queue lookup also use this
-        # transport while holding the process-wide SDK auth lock.
+        # CodeFlare's client verification and queue lookup also use this transport.
         if kwargs.get("_request_timeout") is None:
             kwargs["_request_timeout"] = _K8S_TIMEOUT_SECONDS
         try:
@@ -162,20 +157,10 @@ def _parse_location(uri: str, *, output: bool = False) -> dict[str, str]:
     return {"scheme": scheme, "name": parsed.netloc, "path": path}
 
 
-def _validate_request(request: CreateJobRequest) -> tuple[ResourceSpec, dict[str, int | float]]:
+def _validate_request(request: CreateJobRequest) -> tuple[ResourceSpec, dict[str, Any]]:
     if request.backend not in (None, JobBackend.RAY):
         raise ApiError(501, "not_implemented", "Only the Ray backend is implemented.")
-    if request.algorithm.name != "lora_sft":
-        raise _invalid("Only the basic lora_sft algorithm is supported.")
-    parameters = request.algorithm.parameters or {}
-    if set(parameters) - _BASIC_PARAMETERS:
-        raise _invalid("Unsupported lora_sft parameter.")
-    for key, value in parameters.items():
-        if key == "learning_rate":
-            if type(value) not in (int, float) or not (0 < value <= 1):
-                raise _invalid("learning_rate must be a positive number at most 1.")
-        elif type(value) is not int or value <= 0:
-            raise _invalid(f"{key} must be a positive integer.")
+    parameters = validate_algorithm_parameters(request.algorithm.name, request.algorithm.parameters)
     if request.queue_name is not None and (
         len(request.queue_name) > 63 or not _NAME_PATTERN.fullmatch(request.queue_name)
     ):
@@ -187,6 +172,13 @@ def _validate_request(request: CreateJobRequest) -> tuple[ResourceSpec, dict[str
         raise _invalid("CPU or memory resource quantity is invalid.")
     if resources.gpu_type is not None and resources.gpu_type not in _GPU_TYPES:
         raise _invalid("gpu_type must be a supported GPU resource name.")
+    gpu_count = resources.gpus_per_node if resources.gpus_per_node is not None else 1
+    try:
+        get_backend(request.algorithm.name).validate_resources(
+            gpu_count, resources.num_nodes or 1, resources.gpu_type or "nvidia.com/gpu", parameters
+        )
+    except ValueError as error:
+        raise _invalid(str(error)) from error
     return resources, parameters
 
 
@@ -205,22 +197,6 @@ class _MetadataRayJob(RayJob):
         resource: dict[str, Any] = super()._build_rayjob_cr()
         resource["metadata"].setdefault("annotations", {}).update(self._submission_annotations)
         return resource
-
-
-@contextmanager
-def _sdk_client_scope(api_client: client.ApiClient) -> Iterator[None]:
-    """Serialize SDK 0.38's process-global auth for one caller's submission."""
-    with _SDK_AUTH_LOCK:
-        previous_client = codeflare_auth.api_client
-        previous_config_path = codeflare_auth.config_path
-        try:
-            # RayJob 0.38 has no api_client parameter. Its constructor and
-            # submission read this global, so keep both inside one lock.
-            codeflare_auth.set_api_client(api_client)
-            yield
-        finally:
-            codeflare_auth.api_client = previous_client
-            codeflare_auth.config_path = previous_config_path
 
 
 def _entrypoint(configuration: dict[str, Any]) -> str:
@@ -390,6 +366,11 @@ class CodeFlareJobBackend:
         }
         if request.output is not None:
             locations["output"] = _parse_location(request.output.destination_uri, output=True)
+        backend = get_backend(request.algorithm.name)
+        try:
+            backend.validate_locations(locations)
+        except ValueError as error:
+            raise _invalid(str(error)) from error
         payload = request.model_dump(mode="json", exclude_unset=True)
         serialized = json.dumps(payload, separators=(",", ":"), sort_keys=True)
         if len(serialized.encode("utf-8")) > 65536:
@@ -401,6 +382,9 @@ class CodeFlareJobBackend:
 
         with _caller_api_client(token) as api_client:
             core_api = client.CoreV1Api(api_client)
+            catalog = read_algorithm_catalog(core_api, self._image)
+            if request.algorithm.name not in catalog:
+                raise _invalid("Algorithm is not enabled in the configured image catalog.")
             resolved, volumes, mounts = _storage_plan(
                 core_api, project, locations, resources.num_nodes or 1
             )
@@ -409,37 +393,44 @@ class CodeFlareJobBackend:
             cpu = resources.cpus_per_node or "8"
             memory = resources.memory_per_node or "32Gi"
             workers = (resources.num_nodes or 1) - 1
-            cluster = ManagedClusterConfig(
+            layout = backend.cluster_options(gpu_count, cpu, memory, resolved)
+            cluster = ClusterConfiguration(
                 image=self._image,
                 num_workers=workers,
-                head_cpu_requests=cpu,
-                head_cpu_limits=cpu,
-                head_memory_requests=memory,
-                head_memory_limits=memory,
-                head_accelerators={gpu_type: gpu_count} if gpu_count else {},
+                head_cpu_requests=layout["head_cpu"],
+                head_cpu_limits=layout["head_cpu"],
+                head_memory_requests=layout["head_memory"],
+                head_memory_limits=layout["head_memory"],
+                head_extended_resource_requests={gpu_type: layout["head_gpu_count"]}
+                if layout["head_gpu_count"]
+                else {},
                 worker_cpu_requests=cpu,
                 worker_cpu_limits=cpu,
                 worker_memory_requests=memory,
                 worker_memory_limits=memory,
-                worker_accelerators={gpu_type: gpu_count} if gpu_count else {},
+                worker_extended_resource_requests={gpu_type: gpu_count} if gpu_count else {},
+                envs=layout["envs"],
                 volumes=volumes,
                 volume_mounts=mounts,
             )
-            with _sdk_client_scope(api_client):
-                job = _MetadataRayJob(
-                    job_name=request.name,
-                    namespace=project,
-                    entrypoint=_entrypoint(
-                        {
-                            **resolved,
-                            "parameters": parameters,
-                        }
-                    ),
-                    cluster_config=cluster,
-                    local_queue=request.queue_name,
-                    annotations=annotations,
-                )
-                identifier = str(job.submit())
+            job = _MetadataRayJob(
+                job_name=request.name,
+                namespace=project,
+                entrypoint=_entrypoint(
+                    {
+                        **resolved,
+                        "algorithm": request.algorithm.name,
+                        "parameters": parameters,
+                        "gpus_per_node": gpu_count,
+                        "num_workers": workers,
+                    }
+                ),
+                cluster_config=cluster,
+                local_queue=request.queue_name,
+                annotations=annotations,
+                api_client=api_client,
+            )
+            identifier = str(job.submit())
             if identifier != request.name:
                 raise RuntimeError("CodeFlare returned an unexpected RayJob identifier")
             return identifier

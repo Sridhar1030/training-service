@@ -4,6 +4,7 @@
 
 from typing import Annotated, ClassVar
 
+from fastapi import Request
 from pydantic import Field, StrictStr
 
 from training_service.errors import ApiError
@@ -33,6 +34,7 @@ class BaseInfrastructureDiscoveryApi:
     async def list_algorithms(
         self,
         token_OpenShiftBearer: TokenModel,
+        request: Request,
     ) -> ListAlgorithms200Response:
         """List available Ray training algorithms"""
         raise ApiError(501, "not_implemented", "This operation is not implemented.")
@@ -54,6 +56,7 @@ class BaseInfrastructureDiscoveryApi:
             ),
         ],
         token_OpenShiftBearer: TokenModel,
+        request: Request,
     ) -> QueueInfoResponse:
         """List available Kueue LocalQueues in the OpenShift Project (if Kueue is enabled)"""
         raise ApiError(501, "not_implemented", "This operation is not implemented.")
