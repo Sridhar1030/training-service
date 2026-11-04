@@ -31,9 +31,8 @@ mapping produces upstream lookup warnings; the template supplies its import,
 and focused unit tests verify request examples round-trip unchanged.
 
 Authentication, project authorization, submission, job reads, driver logs,
-terminal deletion, and algorithm/queue discovery are handwritten outside the
-generated tree. Estimation remains fail-closed with `501`. See
-[algorithm parameter coverage and discovery configuration](../algorithm-discovery.md).
+and terminal deletion are handwritten outside the generated tree. Algorithm
+and queue discovery and estimation remain fail-closed with `501`.
 
 The POST-only `x-submission-context` preserves the 202 status and Location
 header. Operations marked `x-request-context` also receive the authenticated
@@ -59,8 +58,3 @@ leaves handwritten source untouched.
 Commit the contract/templates and regenerated sources together. CI regenerates
 the package and checks that the committed output is current. Generator
 bookkeeping is ignored; API source is not.
-
-Queue discovery retains `x-project-authorization` metadata with
-`deferToHandler: true`: the handler first verifies project access and Kueue
-availability, then performs the declared LocalQueue list authorization when
-Kueue is present. This is the only operation allowed to defer that check.

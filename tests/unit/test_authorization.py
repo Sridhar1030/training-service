@@ -278,10 +278,6 @@ def test_project_scoped_operations_declare_complete_authorization_metadata() -> 
             assert {"group", "resource", "verb"} <= metadata.keys()
             assert all(metadata[field] for field in ("group", "resource", "verb"))
 
-            if metadata.get("deferToHandler"):
-                assert path == "/projects/{project}/queues" and method == "get"
-                assert operation["x-request-context"] is True
-
             resource_name_parameter = metadata.get("resourceNameParameter")
             if resource_name_parameter is not None:
                 parameters = [*path_item.get("parameters", []), *operation.get("parameters", [])]

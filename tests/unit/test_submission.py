@@ -35,16 +35,6 @@ from training_service_api.models.create_job_request import CreateJobRequest
 from training_service_api.models.error_response import ErrorResponse
 
 
-@pytest.fixture(autouse=True)
-def approved_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Catalog transport/schema enforcement is covered independently in test_discovery.
-    monkeypatch.setattr(
-        submission,
-        "read_algorithm_catalog",
-        lambda _api, _image: dict.fromkeys(("sft", "osft", "lora_sft", "lora_grpo"), {}),
-    )
-
-
 def _sample(name: str = "pvc_inputs_output") -> CreateJobRequest:
     examples = load_contract()["paths"]["/projects/{project}/training-jobs"]["post"]["requestBody"][
         "content"
@@ -127,29 +117,6 @@ def test_omitted_queue_is_not_invented_in_receipt() -> None:
     )
     assert response.status_code == 202
     assert "queue_name" not in response.json()
-
-
-def test_rayjob_name_limit_accounts_for_kuberay_generated_volume_name() -> None:
-    submitter = RecordingSubmitter()
-    http = TestClient(create_app(FakeAuthenticator(), FakeAuthorizer(), submitter))
-    payload = _sample().model_dump(mode="json", exclude_unset=True)
-    payload["name"] = "a" * 34
-    assert len("kube-rbac-proxy-config-" + payload["name"] + "-abcde") == 63
-    accepted = http.post(
-        "/api/v1/projects/team-alpha/training-jobs",
-        json=payload,
-        headers={"Authorization": "Bearer caller-token"},
-    )
-    assert accepted.status_code == 202
-    payload["name"] += "a"
-    rejected = http.post(
-        "/api/v1/projects/team-alpha/training-jobs",
-        json=payload,
-        headers={"Authorization": "Bearer caller-token"},
-    )
-    assert rejected.status_code == 422
-    assert rejected.json()["message"] == "name must be at most 34 characters."
-    assert len(submitter.calls) == 1
 
 
 @pytest.mark.parametrize(
@@ -534,7 +501,6 @@ def test_sdk_submission_metadata_and_topology_are_readable(
 
 def test_omitted_basic_options_use_contract_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     _mock_sdk(monkeypatch)
-    monkeypatch.setattr(submission, "default_queue_for_submission", lambda _api, _project: None)
     entry_config: dict[str, Any] = {}
 
     def record_entrypoint(configuration: dict[str, Any]) -> str:
@@ -562,26 +528,6 @@ def test_omitted_basic_options_use_contract_defaults(monkeypatch: pytest.MonkeyP
     assert len(cluster.volumes) == 2
     assert entry_config["parameters"] == {}
     assert "output" not in entry_config
-
-
-def test_omitted_queue_uses_caller_resolved_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    _mock_sdk(monkeypatch)
-    seen: list[tuple[Any, str]] = []
-
-    def resolve(api: Any, project: str) -> str:
-        seen.append((api, project))
-        return "reviewed-default"
-
-    monkeypatch.setattr(submission, "default_queue_for_submission", resolve)
-    payload = _sample().model_dump(mode="json", exclude_unset=True)
-    payload.pop("queue_name")
-    body = CreateJobRequest.model_validate(payload)
-    submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")._submit_sync(
-        "team-alpha", body, CallerIdentity("alice", None, ()), "caller-token"
-    )
-    assert seen[0][1] == "team-alpha"
-    assert seen[0][0].token == "caller-token"
-    assert FakeRayJob.instances[0].kwargs["local_queue"] == "reviewed-default"
 
 
 @pytest.mark.parametrize(
@@ -1000,18 +946,6 @@ def test_lora_multi_gpu_requires_explicit_model_splitting() -> None:
     resources, parameters = submission._validate_request(body)
     assert resources.gpus_per_node == 2
     assert parameters["enable_model_splitting"] is True
-
-
-def test_catalog_disables_submission_before_storage_or_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
-    core = _mock_sdk(monkeypatch)
-    monkeypatch.setattr(submission, "read_algorithm_catalog", lambda _api, _image: {})
-    with pytest.raises(ApiError, match="not enabled") as raised:
-        submission.CodeFlareJobBackend("image")._submit_sync(
-            "team-alpha", _sample(), CallerIdentity("alice", None, ()), "caller-token"
-        )
-    assert raised.value.status_code == 422
-    assert core.pvc_reads == []
-    assert FakeRayJob.instances == []
 
 
 def test_conflicting_lora_precision_requires_explicit_bf16_false() -> None:

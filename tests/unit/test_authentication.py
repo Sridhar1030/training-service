@@ -115,13 +115,13 @@ def test_verified_identity_is_propagated_without_the_bearer_token() -> None:
     assert authenticator.tokens == ["accepted-token"]
 
 
-def test_authenticated_generated_route_requires_catalog_configuration() -> None:
+def test_authenticated_generated_route_reaches_current_fail_closed_scaffold() -> None:
     client, _ = protected_client(CallerIdentity("alice", "uid-1", ()))
 
     response = client.get("/api/v1/algorithms", headers={"Authorization": "Bearer accepted-token"})
 
-    assert response.status_code == 503
-    assert response.json()["code"] == "backend_unavailable"
+    assert response.status_code == 501
+    assert response.json()["code"] == "not_implemented"
 
 
 def test_token_review_uses_a_finite_timeout() -> None:

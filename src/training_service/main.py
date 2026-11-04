@@ -7,7 +7,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from training_service.api_impl import discovery, observability, training_jobs  # noqa: F401
+from training_service.api_impl import observability, training_jobs  # noqa: F401
 from training_service.auth import KubernetesTokenAuthenticator, OpenShiftTokenAuthenticator
 from training_service.authorization import KubernetesProjectAuthorizer, OpenShiftProjectAuthorizer
 from training_service.contract import component_validator, contract_document, load_contract

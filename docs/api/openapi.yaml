@@ -73,14 +73,7 @@ paths:
         caller's identity to discover the catalog and parameter schemas exposed
         by the configured Ray Universal Image for this deployment. The catalog
         is release- and image-specific; it is not a universal hardcoded list.
-        A configured ConfigMap contains catalog.json, bound to the exact
-        TRAINING_RAY_IMAGE value. Only reviewed API adapters with matching
-        parameter schemas are exposed; newly installed Training Hub algorithms
-        are not enabled automatically. Missing, malformed, or mismatched
-        catalog configuration returns 503. The caller needs get permission on
-        that named ConfigMap. Submission enforces the same catalog.
       operationId: listAlgorithms
-      x-request-context: true
       tags:
         - Infrastructure & Discovery
       responses:
@@ -100,7 +93,7 @@ paths:
         '401':
           $ref: '#/components/responses/401Unauthorized'
         '503':
-          $ref: '#/components/responses/503DiscoveryUnavailable'
+          $ref: '#/components/responses/503OpenShiftUnavailable'
         '403':
           $ref: '#/components/responses/403Forbidden'
 
@@ -761,18 +754,12 @@ paths:
         caller's identity and permissions in the target project. Kueue is
         optional; if it is not installed or enabled, returns kueue_enabled=false
         and an empty queues list. Does not create, update, or delete queues or
-        expose cluster-wide quota information. Project access is checked first.
-        When Kueue is present, LocalQueue list authorization is checked before
-        listing. Forbidden discovery or list access returns 403, never a false
-        disabled response. TRAINING_KUEUE_ENABLED=false explicitly disables
-        this discovery helper without altering SDK queue admission.
+        expose cluster-wide quota information.
       operationId: listQueues
-      x-request-context: true
       x-project-authorization:
         group: kueue.x-k8s.io
         resource: localqueues
         verb: list
-        deferToHandler: true
       tags:
         - Infrastructure & Discovery
       parameters:
@@ -784,12 +771,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/QueueInfoResponse'
-        '400':
-          $ref: '#/components/responses/400BadRequest'
         '401':
           $ref: '#/components/responses/401Unauthorized'
         '503':
-          $ref: '#/components/responses/503DiscoveryUnavailable'
+          $ref: '#/components/responses/503OpenShiftUnavailable'
         '403':
           $ref: '#/components/responses/403Forbidden'
         '404':
@@ -905,15 +890,6 @@ components:
           example:
             code: authentication_unavailable
             message: OpenShift token validation is temporarily unavailable.
-    '503DiscoveryUnavailable':
-      description: Authentication, authorization, Kubernetes discovery, or configured image catalog is unavailable
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/ErrorResponse'
-          example:
-            code: backend_unavailable
-            message: The configured discovery backend is unavailable.
     '501NotImplemented':
       description: Requested backend is not implemented in this Developer Preview
       content:
@@ -951,23 +927,18 @@ components:
         name:
           type: string
           minLength: 1
-          maxLength: 34
+          maxLength: 47
           pattern: '^[a-z]([-a-z0-9]*[a-z0-9])?$'
-          description: >
-            DNS-1035-compatible RayJob name. Limited to 34 characters because
-            KubeRay appends a cluster suffix and generates a
-            kube-rbac-proxy-config- volume name, which must fit Kubernetes'
-            63-character DNS-label limit.
+          description: DNS-1035-compatible RayJob name; limited to 47 characters by the submission path.
           example: llama3-8b-alpaca-lora
         queue_name:
           type: string
           nullable: true
           description: >
             Optional Kueue LocalQueue in the target project. When omitted,
-            the API resolves a default LocalQueue with the caller's permissions.
-            If none exists, CodeFlare submits without a queue label, subject
-            to platform admission policy. Lookup failures are not treated as
-            absence of a default. This does not grant access to any queue.
+            CodeFlare uses a configured default LocalQueue if one exists;
+            otherwise the job is submitted without a queue. Subject to caller
+            permissions and platform admission policy; this does not grant access.
           example: team-alpha-local-queue
         backend:
           $ref: '#/components/schemas/JobBackend'

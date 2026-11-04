@@ -66,11 +66,6 @@ async def {{operationId}}(
     {{#vendorExtensions.x-project-authorization}}
     request: Request,
     {{/vendorExtensions.x-project-authorization}}
-    {{^vendorExtensions.x-project-authorization}}
-    {{#vendorExtensions.x-request-context}}
-    request: Request,
-    {{/vendorExtensions.x-request-context}}
-    {{/vendorExtensions.x-project-authorization}}
     {{#vendorExtensions.x-submission-context}}
     response: Response,
     {{/vendorExtensions.x-submission-context}}
@@ -87,7 +82,6 @@ async def {{operationId}}(
 ) -> {{returnType}}{{^returnType}}None{{/returnType}}:
     """{{#summary}}{{.}}{{/summary}}{{^summary}}Handle this API operation.{{/summary}}"""
     {{#vendorExtensions.x-project-authorization}}
-    {{^deferToHandler}}
     await authorize_project_request(
         request,
         project,
@@ -103,7 +97,6 @@ async def {{operationId}}(
         {{#resourceNameParameter}}resource_name={{.}},
         {{/resourceNameParameter}}
     )
-    {{/deferToHandler}}
     {{/vendorExtensions.x-project-authorization}}
     implementation = Base{{classname}}.implementation()
     {{#vendorExtensions.x-submission-context}}

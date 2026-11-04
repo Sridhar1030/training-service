@@ -15,6 +15,7 @@ from fastapi import (
 from pydantic import Field, StrictStr
 
 import training_service_api.impl
+from training_service.authorization import authorize_project_request
 from training_service_api.apis.infrastructure_discovery_api_base import (
     BaseInfrastructureDiscoveryApi,
 )
@@ -46,10 +47,7 @@ for _, name, _ in pkgutil.iter_modules(ns_pkg.__path__, ns_pkg.__name__ + "."):
         },
         503: {
             "model": ErrorResponse,
-            "description": (
-                "Authentication, authorization, Kubernetes discovery, or configured "
-                "image catalog is unavailable"
-            ),
+            "description": "OpenShift authentication or authorization is temporarily unavailable",
         },
         403: {
             "model": ErrorResponse,
@@ -64,13 +62,12 @@ for _, name, _ in pkgutil.iter_modules(ns_pkg.__path__, ns_pkg.__name__ + "."):
     response_model_exclude_unset=True,
 )
 async def list_algorithms(
-    request: Request,
     token_OpenShiftBearer: TokenModel = Security(get_token_OpenShiftBearer),
 ) -> ListAlgorithms200Response:
     """List available Ray training algorithms"""
     implementation = BaseInfrastructureDiscoveryApi.implementation()
     return await implementation.list_algorithms(
-        token_OpenShiftBearer=token_OpenShiftBearer, request=request
+        token_OpenShiftBearer=token_OpenShiftBearer,
     )
 
 
@@ -81,20 +78,13 @@ async def list_algorithms(
             "model": QueueInfoResponse,
             "description": "List of LocalQueues accessible in the specified OpenShift Project",
         },
-        400: {
-            "model": ErrorResponse,
-            "description": "Malformed JSON or invalid query/path parameter syntax",
-        },
         401: {
             "model": ErrorResponse,
             "description": "Missing, invalid, or expired OpenShift bearer token",
         },
         503: {
             "model": ErrorResponse,
-            "description": (
-                "Authentication, authorization, Kubernetes discovery, or configured "
-                "image catalog is unavailable"
-            ),
+            "description": "OpenShift authentication or authorization is temporarily unavailable",
         },
         403: {
             "model": ErrorResponse,
@@ -146,7 +136,15 @@ async def list_queues(
     token_OpenShiftBearer: TokenModel = Security(get_token_OpenShiftBearer),
 ) -> QueueInfoResponse:
     """List available Kueue LocalQueues in the OpenShift Project (if Kueue is enabled)"""
+    await authorize_project_request(
+        request,
+        project,
+        group="kueue.x-k8s.io",
+        resource="localqueues",
+        verb="list",
+    )
     implementation = BaseInfrastructureDiscoveryApi.implementation()
     return await implementation.list_queues(
-        project, token_OpenShiftBearer=token_OpenShiftBearer, request=request
+        project,
+        token_OpenShiftBearer=token_OpenShiftBearer,
     )

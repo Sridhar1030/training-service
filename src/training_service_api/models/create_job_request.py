@@ -25,23 +25,20 @@ class CreateJobRequest(ContractModel):
     Schema: CreateJobRequest in docs/api/openapi.yaml.
     """
 
-    name: Annotated[str, Field(min_length=1, strict=True, max_length=34)] = Field(
+    name: Annotated[str, Field(min_length=1, strict=True, max_length=47)] = Field(
         description=(
-            "DNS-1035-compatible RayJob name. Limited to 34 characters because "
-            "KubeRay appends a cluster suffix and generates a "
-            "kube-rbac-proxy-config- volume name, which must fit Kubernetes' "
-            "63-character DNS-label limit. "
+            "DNS-1035-compatible RayJob name; limited to 47 characters by the submission path."
         ),
         json_schema_extra={"examples": ["llama3-8b-alpaca-lora"]},
     )
     queue_name: StrictStr | None = Field(
         default=None,
         description=(
-            "Optional Kueue LocalQueue in the target project. When omitted, the "
-            "API resolves a default LocalQueue with the caller's permissions. If "
-            "none exists, CodeFlare submits without a queue label, subject to "
-            "platform admission policy. Lookup failures are not treated as absence "
-            "of a default. This does not grant access to any queue. "
+            "Optional Kueue LocalQueue in the target project. When omitted, "
+            "CodeFlare uses a configured default LocalQueue if one exists; "
+            "otherwise the job is submitted without a queue. Subject to caller "
+            "permissions and platform admission policy; this does not grant "
+            "access. "
         ),
         json_schema_extra={"examples": ["team-alpha-local-queue"]},
     )
