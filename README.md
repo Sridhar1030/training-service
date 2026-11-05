@@ -24,6 +24,9 @@ OSFT requires `unfreeze_rank_ratio`, `effective_batch_size`,
 `data_output_dir` beneath the output directory. Model/data preparation shown
 in the notebooks is still performed before calling the API; the request uses
 existing project storage or Hugging Face repositories.
+For Hugging Face datasets loaded on the Ray head, `dataset.config` selects
+a named dataset configuration and `dataset.split` selects a split (default:
+`train`). These options are not used by the remote GRPO loader.
 
 For SFT, OSFT, and LoRA SFT, the Ray head runs training and receives
 `resources.gpus_per_node` GPUs, matching the one-node examples. For LoRA GRPO,
@@ -50,6 +53,10 @@ Hub 0.8.1 and 0.11.2, not every parameter of either version. Text LoRA's
 image with the intended dataset format.
 
 The API maps resources and queue settings to a CodeFlare RayJob.
+When resources are omitted, the default per-node CPU and memory limits are
+4 CPUs and 16Gi for the training node; the GRPO head keeps its dedicated
+4-CPU/32Gi layout. Callers should size worker resources for their model and
+algorithm.
 The `202` response returns the RayJob name as `id` and a project-scoped
 `Location` header; it does not mean training has completed.
 
@@ -74,10 +81,20 @@ before relying on GRPO training. This image is not confirmed as cluster-shipped
 in every target RHOAI release.
 
 `pvc://` URIs refer to project PVCs. `hf://` and `s3://` URIs refer to
-project Secrets; the selected training image also needs `datasets`,
-`huggingface_hub`, and `boto3` for the corresponding storage paths. Resource
+project Secrets; the selected training image also needs `datasets` and
+`huggingface_hub` for the corresponding storage paths. S3 submissions
+preflight `boto3` and `botocore`; if either is missing, the Ray driver attempts
+to install a pinned pair into its writable job-local directory before training.
+This requires a reachable package index or mirror; otherwise the job fails
+early with an S3 dependency error. Resource
 lookups and RayJob creation use the verified caller's token, while credentials
 are mounted into Ray pods rather than embedded in the RayJob.
+
+An opt-in S3 upload check at `tests/integration/test_s3_output.py` writes a
+checkpoint object, reads it back, and deletes it. Set `TRAINING_S3_E2E_ENDPOINT`,
+`TRAINING_S3_E2E_BUCKET`, `TRAINING_S3_E2E_ACCESS_KEY`, and
+`TRAINING_S3_E2E_SECRET_KEY`, then run
+`pytest tests/integration/test_s3_output.py`. It requires `boto3` locally.
 
 See [job operations](docs/job-operations.md) for permissions, log gateway
 configuration, response examples, and cascading cleanup behavior.

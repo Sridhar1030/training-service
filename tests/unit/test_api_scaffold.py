@@ -67,7 +67,7 @@ def test_generated_models_preserve_approved_wire_format() -> None:
         )
     valid = next(iter(examples.values()))["value"]
     for field, value in (
-        ("dataset", {"split": "train"}),
+        ("dataset", {"config": ""}),
         ("output", {"secret_ref": "obsolete-reference"}),
         ("dataset", {"uri": "pvc://training-data/../escape"}),
     ):

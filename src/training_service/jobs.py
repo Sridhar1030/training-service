@@ -165,8 +165,8 @@ def _validate_request(request: CreateJobRequest) -> tuple[ResourceSpec, dict[str
     ):
         raise _invalid("queue_name must be a DNS-1123 label.")
     resources = request.resources or ResourceSpec()
-    cpu = resources.cpus_per_node or "8"
-    memory = resources.memory_per_node or "32Gi"
+    cpu = resources.cpus_per_node or "4"
+    memory = resources.memory_per_node or "16Gi"
     if not _CPU_PATTERN.fullmatch(cpu) or not _MEMORY_PATTERN.fullmatch(memory):
         raise _invalid("CPU or memory resource quantity is invalid.")
     if resources.gpu_type is not None and resources.gpu_type not in _GPU_TYPES:
@@ -363,6 +363,17 @@ class CodeFlareJobBackend:
             "model": _parse_location(request.model.uri.root),
             "dataset": _parse_location(request.dataset.uri.root),
         }
+        dataset_options = request.dataset.model_dump(exclude={"uri"}, exclude_none=True)
+        if dataset_options:
+            if locations["dataset"]["scheme"] != "hf":
+                raise _invalid(
+                    "dataset.config and dataset.split require a Hugging Face dataset URI."
+                )
+            if get_backend(request.algorithm.name).remote_hf:
+                raise _invalid(
+                    "dataset.config and dataset.split are not supported by the remote GRPO loader."
+                )
+            locations["dataset"].update(dataset_options)
         if request.output is not None:
             locations["output"] = _parse_location(request.output.destination_uri, output=True)
         backend = get_backend(request.algorithm.name)
@@ -386,8 +397,8 @@ class CodeFlareJobBackend:
             )
             gpu_type = resources.gpu_type or "nvidia.com/gpu"
             gpu_count = resources.gpus_per_node if resources.gpus_per_node is not None else 1
-            cpu = resources.cpus_per_node or "8"
-            memory = resources.memory_per_node or "32Gi"
+            cpu = resources.cpus_per_node or "4"
+            memory = resources.memory_per_node or "16Gi"
             workers = (resources.num_nodes or 1) - 1
             layout = backend.cluster_options(gpu_count, cpu, memory, resolved)
             cluster = ClusterConfiguration(

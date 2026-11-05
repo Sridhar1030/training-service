@@ -186,8 +186,8 @@ paths:
                     num_nodes: 1
                     gpus_per_node: 1
                     gpu_type: nvidia.com/gpu
-                    cpus_per_node: "16"
-                    memory_per_node: "64Gi"
+                    cpus_per_node: "4"
+                    memory_per_node: "16Gi"
                   output:
                     destination_uri: s3://checkpoint-storage/my-ml-bucket/checkpoints/llama3-lora/
               s3_inputs:
@@ -211,8 +211,8 @@ paths:
                     num_nodes: 1
                     gpus_per_node: 1
                     gpu_type: nvidia.com/gpu
-                    cpus_per_node: "16"
-                    memory_per_node: "64Gi"
+                    cpus_per_node: "4"
+                    memory_per_node: "16Gi"
                   output:
                     destination_uri: s3://checkpoint-storage/my-ml-bucket/checkpoints/s3-training/
               pvc_inputs_output:
@@ -236,8 +236,8 @@ paths:
                     num_nodes: 1
                     gpus_per_node: 1
                     gpu_type: nvidia.com/gpu
-                    cpus_per_node: "16"
-                    memory_per_node: "64Gi"
+                    cpus_per_node: "4"
+                    memory_per_node: "16Gi"
                   output:
                     destination_uri: pvc://training-output/checkpoints/pvc-training/
               grpo_hf_inputs_pvc_output:
@@ -1062,11 +1062,23 @@ components:
     DatasetSpec:
       type: object
       additionalProperties: false
-      description: Dataset input selected by its project-scoped storage URI.
+      description: >
+        Dataset input selected by its project-scoped storage URI. Optional
+        config and split apply only to Hugging Face datasets loaded locally
+        for SFT, OSFT, and LoRA SFT. LoRA GRPO uses Training Hub's remote
+        dataset loader and its algorithm-level data_config parameter instead.
       required: [uri]
       properties:
         uri:
           $ref: '#/components/schemas/TrainingInputURI'
+        config:
+          type: string
+          minLength: 1
+          description: Optional Hugging Face dataset configuration name, such as All.
+        split:
+          type: string
+          minLength: 1
+          description: Optional Hugging Face split name; defaults to train.
       example:
         uri: hf://hf-secret-token/tatsu-lab/alpaca
 
@@ -1253,12 +1265,12 @@ components:
           example: nvidia.com/gpu
         cpus_per_node:
           type: string
-          default: "8"
-          example: "16"
+          default: "4"
+          example: "4"
         memory_per_node:
           type: string
-          default: "32Gi"
-          example: "64Gi"
+          default: "16Gi"
+          example: "16Gi"
 
     OutputSpec:
       type: object

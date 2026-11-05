@@ -5,9 +5,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Self
+from typing import Annotated, Any, Self
 
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 
 from training_service.contract import ContractModel
 from training_service.contract_types import TrainingInputURI
@@ -20,6 +20,12 @@ class DatasetSpec(ContractModel):
     """
 
     uri: TrainingInputURI
+    config: Annotated[str, Field(min_length=1, strict=True)] | None = Field(
+        default=None, description="Optional Hugging Face dataset configuration name, such as All."
+    )
+    split: Annotated[str, Field(min_length=1, strict=True)] | None = Field(
+        default=None, description="Optional Hugging Face split name; defaults to train."
+    )
 
     model_config = ConfigDict(
         populate_by_name=True,

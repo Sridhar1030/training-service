@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import json
 import math
+import subprocess
+import sys
+from importlib import invalidate_caches
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +61,10 @@ class TrainingBackend:
     ) -> dict[str, Any]:
         return dict(parameters)
 
+    def model_path(self, path: str) -> str:
+        """Return the model location expected by this Training Hub backend."""
+        return path
+
     def run(
         self,
         model_path: str,
@@ -71,7 +78,7 @@ class TrainingBackend:
 
         algorithm = training_hub.create_algorithm(self.name, self.backend_name)
         return algorithm.train(
-            model_path=model_path,
+            model_path=self.model_path(model_path),
             data_path=data_path,
             ckpt_output_dir=str(output_dir),
             **self.training_options(data_path, output_dir, parameters, gpus_per_node, num_workers),
@@ -183,6 +190,11 @@ class LoRAGRPOBackend(TrainingBackend):
     backend_name = "verl"
     remote_hf = True
 
+    def model_path(self, path: str) -> str:
+        # verl treats a trailing slash on local model directories as an invalid
+        # model identifier; other Training Hub backends accept that path.
+        return str(Path(path))
+
     def validate_resources(
         self, gpu_count: int, num_nodes: int, gpu_type: str, parameters: dict[str, Any]
     ) -> None:
@@ -196,9 +208,21 @@ class LoRAGRPOBackend(TrainingBackend):
             raise ValueError("tensor_parallel_size must divide gpus_per_node.")
         group_size = parameters.get("group_size", 8)
         prompt_batch_size = parameters.get("prompt_batch_size", 100)
-        if (prompt_batch_size * group_size) % (gpu_count * 4):
+        total_gpus = gpu_count * (num_nodes - 1)
+        if (prompt_batch_size * group_size) % (total_gpus * 4):
             raise ValueError(
-                "prompt_batch_size * group_size must be divisible by 4 * gpus_per_node."
+                "prompt_batch_size * group_size must be divisible by 4 * "
+                "gpus_per_node * (num_nodes - 1)."
+            )
+        # Training Hub derives the PPO minibatch from the prompt batch and
+        # rounds it up to at least one GPU's worth when it is too small.
+        ppo_minibatch = min(prompt_batch_size, 256)
+        if ppo_minibatch % gpu_count:
+            ppo_minibatch = max(gpu_count, (ppo_minibatch // gpu_count) * gpu_count)
+        if prompt_batch_size < ppo_minibatch:
+            raise ValueError(
+                "prompt_batch_size must be at least the derived PPO minibatch size "
+                f"({ppo_minibatch})."
             )
 
     def validate_locations(
@@ -276,6 +300,61 @@ def get_backend(name: str) -> TrainingBackend:
 
 def _secret(directory: str, key: str) -> str:
     return (Path(directory) / key).read_text(encoding="utf-8").strip()
+
+
+def _s3_modules_available() -> bool:
+    try:
+        import boto3  # noqa: F401
+        import botocore  # noqa: F401
+        from boto3.s3 import transfer  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _ensure_s3_runtime(workdir: Path) -> None:
+    """Install the pinned S3 client only when the selected image lacks it."""
+    if _s3_modules_available():
+        return
+    packages = workdir / "site-packages"
+    try:
+        packages.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise RuntimeError(
+            "S3 support is unavailable: the job-local package directory is not writable."
+        ) from error
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                "--no-cache-dir",
+                "--target",
+                str(packages),
+                "boto3==1.40.61",
+                "botocore==1.40.61",
+            ],
+            check=False,
+            capture_output=True,
+            timeout=180,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError(
+            "S3 support is unavailable: the runtime image lacks boto3 and its "
+            "job-local installation failed. Check pip and package index or mirror access."
+        ) from error
+    if result.returncode:
+        raise RuntimeError(
+            "S3 support is unavailable: the runtime image lacks boto3 and its "
+            "job-local installation failed. Check pip and package index or mirror access."
+        )
+    sys.path.insert(0, str(packages))
+    invalidate_caches()
+    if not _s3_modules_available():
+        raise RuntimeError("S3 support is unavailable after dependency installation.")
 
 
 def _s3_client(location: dict[str, Any]) -> Any:
@@ -356,7 +435,12 @@ def _input(location: dict[str, Any], kind: str, workdir: Path, *, remote_hf: boo
             )
         from datasets import load_dataset
 
-        dataset = load_dataset(location["repository"], split="train", token=token)
+        dataset = load_dataset(
+            location["repository"],
+            name=location.get("config"),
+            split=location.get("split", "train"),
+            token=token,
+        )
         target = workdir / "dataset.jsonl"
         dataset.to_json(str(target))
         return str(target)
@@ -409,6 +493,10 @@ def main(configuration: dict[str, Any]) -> None:
 
     workdir = Path("/tmp/training-api")
     workdir.mkdir(parents=True, exist_ok=True)
+    if any(
+        configuration.get(role, {}).get("scheme") == "s3" for role in ("model", "dataset", "output")
+    ):
+        _ensure_s3_runtime(workdir)
     algorithm = configuration["algorithm"]
     remote_hf = get_backend(algorithm).remote_hf
     model_path = _input(configuration["model"], "model", workdir, remote_hf=remote_hf)

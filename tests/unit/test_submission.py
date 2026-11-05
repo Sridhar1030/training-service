@@ -522,8 +522,8 @@ def test_omitted_basic_options_use_contract_defaults(monkeypatch: pytest.MonkeyP
     cluster = kwargs["cluster_config"]
     assert kwargs["local_queue"] is None
     assert cluster.num_workers == 0
-    assert cluster.head_cpu_requests == "8"
-    assert cluster.head_memory_requests == "32Gi"
+    assert cluster.head_cpu_requests == "4"
+    assert cluster.head_memory_requests == "16Gi"
     assert cluster.head_extended_resource_requests == {"nvidia.com/gpu": 1}
     assert len(cluster.volumes) == 2
     assert entry_config["parameters"] == {}
@@ -1222,8 +1222,8 @@ def test_sdk_submission_dispatches_example_algorithm_and_gpu_topology(
         assert cluster.envs["HF_TOKEN_PATH"] == "/mnt/training-api/credentials/0/HF_TOKEN"
         assert cluster.head_cpu_requests == "4"
         assert cluster.head_memory_requests == "32Gi"
-        assert cluster.worker_cpu_requests == "16"
-        assert cluster.worker_memory_requests == "64Gi"
+        assert cluster.worker_cpu_requests == "4"
+        assert cluster.worker_memory_requests == "16Gi"
         built = build_ray_cluster_spec(cluster, "grpo-toucan-cluster")
         head = built["headGroupSpec"]["template"].spec.containers[0]
         worker = built["workerGroupSpecs"][0]["template"].spec.containers[0]
@@ -1315,6 +1315,11 @@ def test_http_post_rejects_invalid_algorithm_overrides(
         {"resources": {"gpus_per_node": 0}},
         {"resources": {"gpu_type": "amd.com/gpu"}},
         {"algorithm": {"parameters": {"prompt_batch_size": 9, "group_size": 1}}},
+        {"resources": {"num_nodes": 4, "gpus_per_node": 1}},
+        {
+            "resources": {"num_nodes": 2, "gpus_per_node": 8},
+            "algorithm": {"parameters": {"prompt_batch_size": 1, "group_size": 32}},
+        },
         {"algorithm": {"parameters": {"group_size": 4, "tensor_parallel_size": 3}}},
         {"output": {"destination_uri": "s3://checkpoint-storage/bucket/checkpoints/"}},
         {"model": {"uri": "s3://model-storage/bucket/model/"}},
@@ -1341,6 +1346,26 @@ def test_invalid_grpo_layout_or_inputs_fail_before_sdk(change: dict[str, Any]) -
             "team-alpha", body, CallerIdentity("alice", None, ()), "caller-token"
         )
     assert raised.value.status_code == 422
+
+
+def test_valid_grpo_batch_uses_total_gpu_topology(monkeypatch: pytest.MonkeyPatch) -> None:
+    _mock_sdk(monkeypatch)
+    payload = _sample().model_dump(mode="json", exclude_unset=True)
+    payload["algorithm"] = {
+        "name": "lora_grpo",
+        "parameters": {"group_size": 4, "prompt_batch_size": 12},
+    }
+    payload["resources"].update({"num_nodes": 4, "gpus_per_node": 1})
+    payload["model"]["uri"] = "hf://hf-secret-token/Qwen/Qwen3-4B"
+    payload["dataset"]["uri"] = "hf://hf-secret-token/Agent-Ark/Toucan-1.5M"
+    job_id = submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")._submit_sync(
+        "team-alpha",
+        CreateJobRequest.model_validate(payload),
+        CallerIdentity("alice", None, ()),
+        "caller-token",
+    )
+    assert job_id == payload["name"]
+    assert FakeRayJob.instances[0].kwargs["cluster_config"].num_workers == 3
 
 
 @pytest.mark.parametrize("algorithm", ["sft", "osft", "lora_sft", "lora_grpo"])
@@ -1386,6 +1411,235 @@ def test_grpo_hf_inputs_remain_remote_for_worker_access(tmp_path: Path) -> None:
     assert ray_entrypoint._input(location, "dataset", tmp_path, remote_hf=True) == (
         "Agent-Ark/Toucan-1.5M"
     )
+
+
+def test_grpo_trailing_slash_pvc_model_is_normalized_before_training(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    recorded: dict[str, Any] = {}
+    monkeypatch.setitem(
+        sys.modules,
+        "training_hub",
+        SimpleNamespace(
+            create_algorithm=lambda _name, _backend: SimpleNamespace(
+                train=lambda **kwargs: recorded.update(kwargs)
+            )
+        ),
+    )
+    model = tmp_path / "model"
+    model.mkdir()
+    ray_entrypoint.main(
+        {
+            "algorithm": "lora_grpo",
+            "model": {"scheme": "pvc", "mount_path": str(model) + "/"},
+            "dataset": {"scheme": "hf", "repository": "Agent-Ark/Toucan-1.5M"},
+            "output": {"scheme": "pvc", "mount_path": str(tmp_path / "output")},
+            "parameters": {},
+            "gpus_per_node": 4,
+            "num_workers": 1,
+        }
+    )
+    assert recorded["model_path"] == str(model)
+
+
+def test_hf_dataset_config_and_split_reach_loader(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    recorded: dict[str, Any] = {}
+    fake_dataset = SimpleNamespace(to_json=lambda path: Path(path).write_text("{}\n"))
+    monkeypatch.setitem(
+        sys.modules,
+        "datasets",
+        SimpleNamespace(
+            load_dataset=lambda *args, **kwargs: recorded.update(kwargs) or fake_dataset
+        ),
+    )
+    credentials = tmp_path / "credentials"
+    credentials.mkdir()
+    (credentials / "HF_TOKEN").write_text("test-token")
+    location = {
+        "scheme": "hf",
+        "repository": "LipengCS/Table-GPT",
+        "credential_dir": str(credentials),
+        "token_key": "HF_TOKEN",
+        "config": "All",
+        "split": "train[:10]",
+    }
+    result = ray_entrypoint._input(location, "dataset", tmp_path)
+    assert recorded == {"name": "All", "split": "train[:10]", "token": "test-token"}
+    assert result == str(tmp_path / "dataset.jsonl")
+
+
+def test_hf_dataset_options_are_preserved_in_submission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_sdk(monkeypatch)
+    configuration: dict[str, Any] = {}
+    monkeypatch.setattr(
+        submission, "_entrypoint", lambda value: configuration.update(value) or "python -c 'pass'"
+    )
+    payload = _sample("huggingface_inputs_s3_output").model_dump(mode="json", exclude_unset=True)
+    payload["dataset"] = {
+        "uri": "hf://hf-secret-token/LipengCS/Table-GPT",
+        "config": "All",
+        "split": "train[:10]",
+    }
+    request = CreateJobRequest.model_validate(payload)
+    submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")._submit_sync(
+        "team-alpha", request, CallerIdentity("alice", None, ()), "caller-token"
+    )
+    assert configuration["dataset"]["repository"] == "LipengCS/Table-GPT"
+    assert configuration["dataset"]["config"] == "All"
+    assert configuration["dataset"]["split"] == "train[:10]"
+
+
+@pytest.mark.parametrize("dataset", [{"config": "All"}, {"split": "train"}])
+def test_hf_dataset_options_reject_non_hf_and_remote_grpo(
+    dataset: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _mock_sdk(monkeypatch)
+    payload = _sample().model_dump(mode="json", exclude_unset=True)
+    payload["dataset"].update(dataset)
+    with pytest.raises(ApiError, match="Hugging Face dataset URI"):
+        submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")._submit_sync(
+            "team-alpha",
+            CreateJobRequest.model_validate(payload),
+            CallerIdentity("alice", None, ()),
+            "caller-token",
+        )
+    payload["algorithm"] = {"name": "lora_grpo"}
+    payload["resources"]["num_nodes"] = 2
+    payload["dataset"]["uri"] = "hf://hf-secret-token/Agent-Ark/Toucan-1.5M"
+    with pytest.raises(ApiError, match="remote GRPO loader"):
+        submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")._submit_sync(
+            "team-alpha",
+            CreateJobRequest.model_validate(payload),
+            CallerIdentity("alice", None, ()),
+            "caller-token",
+        )
+    assert FakeRayJob.instances == []
+
+
+def test_s3_dependency_preflight_skips_install_when_available(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(ray_entrypoint, "_s3_modules_available", lambda: True)
+    monkeypatch.setattr(
+        ray_entrypoint.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("S3 packages must not be reinstalled"),
+    )
+    ray_entrypoint._ensure_s3_runtime(tmp_path)
+
+
+def test_s3_dependency_preflight_installs_pinned_pair_and_waits(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    checks = iter((False, True))
+    monkeypatch.setattr(ray_entrypoint, "_s3_modules_available", lambda: next(checks))
+    commands: list[list[str]] = []
+
+    def install(command: list[str], **kwargs: Any) -> SimpleNamespace:
+        commands.append(command)
+        assert kwargs["timeout"] == 180
+        assert kwargs["capture_output"] is True
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(ray_entrypoint.subprocess, "run", install)
+    previous_path = list(sys.path)
+    try:
+        ray_entrypoint._ensure_s3_runtime(tmp_path)
+        assert sys.path[0] == str(tmp_path / "site-packages")
+    finally:
+        sys.path[:] = previous_path
+    assert len(commands) == 1
+    assert "boto3==1.40.61" in commands[0]
+    assert "botocore==1.40.61" in commands[0]
+
+
+def test_s3_dependency_preflight_fails_before_training(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(ray_entrypoint, "_s3_modules_available", lambda: False)
+    monkeypatch.setattr(
+        ray_entrypoint.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=1),
+    )
+    with pytest.raises(RuntimeError, match="Check pip and package index or mirror access"):
+        ray_entrypoint._ensure_s3_runtime(tmp_path)
+
+
+def test_s3_dependency_failure_stops_before_training(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_preflight(_workdir: Path) -> None:
+        raise RuntimeError("S3 support is unavailable")
+
+    monkeypatch.setattr(ray_entrypoint, "_ensure_s3_runtime", fail_preflight)
+    monkeypatch.setattr(
+        ray_entrypoint,
+        "_run_training",
+        lambda *_args: pytest.fail("Training must not start without S3 support"),
+    )
+    with pytest.raises(RuntimeError, match="S3 support is unavailable"):
+        ray_entrypoint.main(
+            {
+                "algorithm": "lora_sft",
+                "model": {"scheme": "pvc", "mount_path": "/mnt/model"},
+                "dataset": {"scheme": "pvc", "mount_path": "/mnt/train.jsonl"},
+                "output": {"scheme": "s3", "path": "checkpoints", "bucket": "bucket"},
+                "parameters": {},
+                "gpus_per_node": 1,
+                "num_workers": 0,
+            }
+        )
+
+
+def test_s3_output_preflight_runs_before_training(monkeypatch: pytest.MonkeyPatch) -> None:
+    events: list[str] = []
+    monkeypatch.setattr(
+        ray_entrypoint, "_ensure_s3_runtime", lambda _workdir: events.append("preflight")
+    )
+    monkeypatch.setattr(ray_entrypoint, "_run_training", lambda *_args: events.append("training"))
+    monkeypatch.setattr(ray_entrypoint, "_upload_s3", lambda *_args: events.append("upload"))
+    ray_entrypoint.main(
+        {
+            "algorithm": "lora_sft",
+            "model": {"scheme": "pvc", "mount_path": "/mnt/model"},
+            "dataset": {"scheme": "pvc", "mount_path": "/mnt/train.jsonl"},
+            "output": {"scheme": "s3", "path": "checkpoints", "bucket": "bucket"},
+            "parameters": {},
+            "gpus_per_node": 1,
+            "num_workers": 0,
+        }
+    )
+    assert events == ["preflight", "training", "upload"]
+
+
+def test_s3_checkpoint_upload_uses_expected_object_keys(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    output = tmp_path / "output"
+    adapter = output / "adapter"
+    adapter.mkdir(parents=True)
+    (adapter / "weights.safetensors").write_bytes(b"weights")
+    uploads: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(
+        ray_entrypoint,
+        "_s3_client",
+        lambda _location: SimpleNamespace(
+            upload_file=lambda path, bucket, key: uploads.append((path, bucket, key))
+        ),
+    )
+    ray_entrypoint._upload_s3(
+        {"scheme": "s3", "bucket": "model-bucket", "path": "checkpoints/run-1/"}, output
+    )
+    assert uploads == [
+        (
+            str(adapter / "weights.safetensors"),
+            "model-bucket",
+            "checkpoints/run-1/adapter/weights.safetensors",
+        )
+    ]
 
 
 @pytest.mark.parametrize("algorithm", ["sft", "lora_grpo"])
