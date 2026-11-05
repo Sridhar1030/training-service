@@ -319,8 +319,10 @@ class Observer:
 
     def artifacts(self, pod, container, payload):
         path = self.artifact_mount(pod, container, payload)
-        # Validate LoRA config and safetensors structure/data bounds, not just directory existence.
-        script = """
+        algorithm = payload["algorithm"]["name"]
+        if algorithm == "lora_sft":
+            # Validate LoRA config and safetensors structure/data bounds.
+            script = """
 import json, pathlib, struct, sys
 root = pathlib.Path(sys.argv[1]).resolve(strict=True)
 valid = 0
@@ -345,6 +347,19 @@ for config in root.rglob("adapter_config.json"):
 assert valid, "No usable LoRA adapter checkpoint found"
 print(json.dumps({"validated_lora_checkpoints": valid}))
 """
+            evidence_key = "validated_lora_checkpoints"
+        else:
+            # Other backends use different checkpoint formats. Verify only
+            # that training produced nonempty files inside its unique output.
+            script = """
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1]).resolve(strict=True)
+files = [item for item in root.rglob("*") if item.is_file() and item.stat().st_size > 0]
+assert files, "No nonempty training output files found"
+assert all(item.resolve().is_relative_to(root) for item in files)
+print(json.dumps({"nonempty_output_files": len(files)}))
+"""
+            evidence_key = "nonempty_output_files"
         try:
             result = subprocess.run(
                 [
@@ -369,9 +384,6 @@ print(json.dumps({"validated_lora_checkpoints": valid}))
             data = json.loads(result.stdout) if result.returncode == 0 else {}
         except (OSError, ValueError, subprocess.TimeoutExpired):
             data = {}
-        if (
-            not isinstance(data.get("validated_lora_checkpoints"), int)
-            or data["validated_lora_checkpoints"] < 1
-        ):
-            raise ValueError("Output verifier failed: inspect the retained per-run LoRA artifacts")
+        if not isinstance(data.get(evidence_key), int) or data[evidence_key] < 1:
+            raise ValueError("Output verifier failed: inspect the retained per-run training output")
         return data

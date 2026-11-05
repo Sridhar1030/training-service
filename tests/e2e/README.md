@@ -50,6 +50,32 @@ From the repository root:
 make test-e2e-deploy E2E_ARGS="--image-repository quay.io/YOUR_ORG/training-service --values /path/to/e2e-values.yaml --storage-class YOUR_RWX_CLASS"
 ```
 
+This keeps PR #10's baseline `lora_sft` lifecycle. To run the **four-algorithm
+matrix** on the same isolated deployment, add `--algorithm-matrix` to `E2E_ARGS`.
+It submits separate `sft`, `osft`, `lora_sft` and `lora_grpo` jobs, checks
+accepted requests and preserved parameters, waits for `SUCCEEDED`, reads log snapshots,
+checks output files and verifies owner-scoped cleanup. The fixture prepares chat
+and math JSONL datasets. GRPO needs a GPU-free Ray head plus a GPU worker, so
+the ClusterQueue must admit the larger request. The selected Ray/Training Hub
+runtime must actually support all four backends; the test does not install or
+repair runtime dependencies. A known verl/TRL import failure is reported as a
+failed GRPO test, never counted as a pass.
+The baseline run still verifies incremental SSE. The matrix omits that timing-
+sensitive check so a short training run cannot fail solely because it finished
+before a stream could be observed.
+
+```bash
+make test-e2e-deploy E2E_ARGS="--image-repository quay.io/YOUR_ORG/training-service --values /path/to/e2e-values.yaml --storage-class YOUR_RWX_CLASS --algorithm-matrix"
+```
+
+Against an existing deployment, use `make test-e2e` with `--algorithm-matrix`
+and `--job-file` pointing to a PVC template whose dataset is under `datasets/`.
+Stage `tiny-chat.jsonl` and `tiny-math.jsonl` in that same PVC first. The
+matrix's algorithm-specific parameters are in
+[`algorithms.py`](algorithms.py); each request is stored unchanged in the job
+detail. This is representative end-to-end coverage, not an exhaustive test of
+every optional Training Hub parameter.
+
 Both E2E commands use `oc whoami -t` from your current login when
 `TRAINING_SERVICE_TOKEN` is unset or blank. No manual token export is needed.
 Set `TRAINING_SERVICE_TOKEN` explicitly to use another API caller, or to test an
@@ -138,7 +164,8 @@ The [namespace manifest](fixtures/namespace.yaml) includes
 unique E2E ownership label. It creates LocalQueue `e2e` backed by the existing
 ClusterQueue `default` (override with `--cluster-queue`), a 5Gi RWX PVC and a
 fixture/verifier pod. The pod downloads a pinned public Qwen2.5-0.5B-Instruct
-revision and prepares eight chat examples; training uses PVC references and
+revision and prepares eight chat examples plus twelve math examples; training
+uses PVC references and
 needs no HF token. The generated request and manifests are saved with results.
 The fixture pod uses the new namespace's OpenShift-allocated `fsGroup` so the CSI
 driver can grant non-root access to its new PVC; no privileged/root setup pod or
@@ -208,8 +235,8 @@ The normal deployment command above **always includes Kueue**. To separately
 test an already-deployed service without Kueue, use `make test-e2e`, not the
 deployment runner. Supply a known-good [workload JSON](examples/job.example.json), existing
 PVC/model/dataset/output references and a prepared
-[read-only verifier pod](examples/artifact-verifier.example.yaml). Main currently supports
-basic `lora_sft`, not all Training Hub APIs.
+[read-only verifier pod](examples/artifact-verifier.example.yaml). The baseline
+checks `lora_sft`; `--algorithm-matrix` opts into all four supported algorithms.
 
 ```bash
 # Set TRAINING_SERVICE_URL and TRAINING_SERVICE_PROJECT; the token defaults to oc.

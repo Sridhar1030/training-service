@@ -11,6 +11,8 @@ from pathlib import Path
 import httpx
 import pytest
 
+from tests.e2e.algorithms import ALGORITHMS
+
 TERMINAL = {"SUCCEEDED", "FAILED", "STOPPED"}
 
 
@@ -74,6 +76,18 @@ def observe(observer, job_id):
 
 
 def test_training_job_lifecycle(api, training_job, pytestconfig, observer, request):
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            lifecycle(api, training_job, pytestconfig, observer, executor)
+    except (AssertionError, pytest.fail.Exception):
+        if observer and observer.queue:
+            request.node.user_properties.append(("observer_failure", observer.queue_diagnostic()))
+        raise
+
+
+@pytest.mark.parametrize("training_job", ALGORITHMS, indirect=True, ids=ALGORITHMS)
+def test_algorithm_lifecycle(api, training_job, pytestconfig, observer, request):
+    """Each supported algorithm must complete, preserve overrides and clean up."""
     try:
         with ThreadPoolExecutor(max_workers=1) as executor:
             lifecycle(api, training_job, pytestconfig, observer, executor)
@@ -200,7 +214,7 @@ def lifecycle(api, training_job, pytestconfig, observer, executor):
             )
         except Exception:
             pytest.fail(
-                "LoRA checkpoint verification failed; inspect retained output directory",
+                "Training output verification failed; inspect retained output directory",
                 pytrace=False,
             )
 
@@ -235,4 +249,10 @@ def lifecycle(api, training_job, pytestconfig, observer, executor):
             "queue_admitted": bool(observer and observer.admitted),
             "artifacts": artifact_result or "not verified: no --artifact-pod selected",
         }
-        (Path(directory) / "lifecycle.json").write_text(json.dumps(evidence, indent=2) + "\n")
+        name = payload["algorithm"]["name"]
+        filename = (
+            f"lifecycle-{name}.json"
+            if pytestconfig.getoption("algorithm_matrix")
+            else "lifecycle.json"
+        )
+        (Path(directory) / filename).write_text(json.dumps(evidence, indent=2) + "\n")

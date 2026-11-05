@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests.e2e.algorithms import ALGORITHMS
+
 
 @pytest.mark.parametrize("path", ["/healthz", "/readyz"])
 def test_probes(api, path):
@@ -309,6 +311,36 @@ def test_rejected_submission_creates_no_job(api, missing_job_id, pytestconfig, v
             "POST", api.jobs, expected=501 if variation == "kft" else 422, json=payload
         )
         api.error(response, "not_implemented" if variation == "kft" else "validation_error")
+        api.error(api.request("GET", f"{api.jobs}/{payload['name']}", expected=404), "not_found")
+    finally:
+        api.cleanup(payload["name"], pytestconfig.getoption("cleanup_timeout"), payload)
+
+
+@pytest.mark.parametrize("algorithm", ALGORITHMS)
+@pytest.mark.parametrize("invalid", ["unsupported", "malformed"])
+def test_algorithm_parameters_rejected_before_submission(
+    api, missing_job_id, pytestconfig, algorithm, invalid
+):
+    """The real API must reject bad per-algorithm overrides without creating a RayJob."""
+    bad_values = {
+        "sft": {"num_epochs": "one"},
+        "osft": {"unfreeze_rank_ratio": "half"},
+        "lora_sft": {"logging_steps": 0},
+        "lora_grpo": {"group_size": 0},
+    }
+    parameters = (
+        {"not_a_training_hub_parameter": 1} if invalid == "unsupported" else bad_values[algorithm]
+    )
+    payload = {
+        "name": "e2e-" + missing_job_id[-16:],
+        "model": {"uri": "pvc://e2e-missing-input/model/"},
+        "dataset": {"uri": "pvc://e2e-missing-input/data.jsonl"},
+        "algorithm": {"name": algorithm, "parameters": parameters},
+    }
+    try:
+        response = api.request("POST", api.jobs, expected=422, json=payload)
+        api.error(response, "validation_error")
+        assert algorithm in api.object(response)["message"]
         api.error(api.request("GET", f"{api.jobs}/{payload['name']}", expected=404), "not_found")
     finally:
         api.cleanup(payload["name"], pytestconfig.getoption("cleanup_timeout"), payload)

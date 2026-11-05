@@ -40,5 +40,12 @@ rows = [
     for i in range(8)
 ]
 dataset.write_text("".join(json.dumps(row) + "\n" for row in rows))
+math = Path("/data/datasets/tiny-math.jsonl")
+math.write_text(
+    "".join(
+        json.dumps({"problem": f"What is {i} plus one?", "answer": str(i + 1)}) + "\n"
+        for i in range(12)
+    )
+)
 Path("/data/outputs").mkdir(exist_ok=True)
-print("Pinned public model and eight training records prepared.", flush=True)
+print("Pinned public model, eight chat records and twelve math records prepared.", flush=True)
