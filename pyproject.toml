@@ -20,6 +20,7 @@ dependencies = [
     "ray[data,default]==2.58.0",
     # The RHOAI 3.6 Ray wheel imports colorama but does not declare it.
     "colorama==0.4.6",
+    "datasets==4.8.5",
     "fastapi>=0.115,<1",
     "jsonschema>=4.23,<5",
     "kubernetes>=31,<36",

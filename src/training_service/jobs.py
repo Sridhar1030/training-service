@@ -29,6 +29,7 @@ from training_service.algorithm_parameters import validate_algorithm_parameters
 from training_service.auth import CallerIdentity
 from training_service.contract import component_validator
 from training_service.errors import ApiError
+from training_service.hf_dataset import validate_hf_dataset, validate_hf_model
 from training_service.kubernetes_client import (
     TIMEOUT,
     caller_client,
@@ -210,7 +211,9 @@ def _storage_plan(
     project: str,
     locations: dict[str, dict[str, str]],
     num_nodes: int,
-) -> tuple[dict[str, dict[str, str]], list[client.V1Volume], list[client.V1VolumeMount]]:
+) -> tuple[
+    dict[str, dict[str, str]], list[client.V1Volume], list[client.V1VolumeMount], dict[str, str]
+]:
     """Resolve each reference with the caller's Kubernetes client."""
     volumes: list[client.V1Volume] = []
     mounts: list[client.V1VolumeMount] = []
@@ -218,6 +221,7 @@ def _storage_plan(
     credential_schemes: dict[str, str] = {}
     token_keys: dict[str, str] = {}
     pvc_paths: dict[str, str] = {}
+    hf_tokens: dict[str, str] = {}
     for location in locations.values():
         name = location["name"]
         scheme = location["scheme"]
@@ -250,6 +254,17 @@ def _storage_plan(
                 token_key = "HF_TOKEN" if "HF_TOKEN" in keys else "token"
                 if token_key not in keys:
                     raise _invalid("Hugging Face Secret must contain HF_TOKEN or token.")
+                raw = (secret.string_data or {}).get(token_key)
+                if raw is None:
+                    try:
+                        raw = base64.b64decode(
+                            (secret.data or {})[token_key], validate=True
+                        ).decode("utf-8")
+                    except (binascii.Error, UnicodeDecodeError, KeyError, ValueError) as error:
+                        raise _invalid("Hugging Face Secret token is invalid.") from error
+                if not raw:
+                    raise _invalid("Hugging Face Secret token is empty.")
+                hf_tokens[name] = raw
                 selected = {token_key}
                 token_keys[name] = token_key
             else:
@@ -289,7 +304,7 @@ def _storage_plan(
             if item["scheme"] == "hf":
                 item["token_key"] = token_keys[name]
         resolved[role] = item
-    return resolved, volumes, mounts
+    return resolved, volumes, mounts, hf_tokens
 
 
 def _map_backend_error(error: Exception, project: str, name: str) -> ApiError:
@@ -392,9 +407,21 @@ class CodeFlareJobBackend:
 
         with _caller_api_client(token) as api_client:
             core_api = client.CoreV1Api(api_client)
-            resolved, volumes, mounts = _storage_plan(
+            resolved, volumes, mounts, hf_tokens = _storage_plan(
                 core_api, project, locations, resources.num_nodes or 1
             )
+            if locations["model"]["scheme"] == "hf":
+                validate_hf_model(
+                    locations["model"]["repository"], hf_tokens[locations["model"]["name"]]
+                )
+            if locations["dataset"]["scheme"] == "hf":
+                validate_hf_dataset(
+                    locations["dataset"]["repository"],
+                    locations["dataset"].get("config"),
+                    locations["dataset"].get("split", "train"),
+                    hf_tokens[locations["dataset"]["name"]],
+                    remote_loader=backend.remote_hf,
+                )
             gpu_type = resources.gpu_type or "nvidia.com/gpu"
             gpu_count = resources.gpus_per_node if resources.gpus_per_node is not None else 1
             cpu = resources.cpus_per_node or "4"

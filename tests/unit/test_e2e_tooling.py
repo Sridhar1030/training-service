@@ -1287,8 +1287,11 @@ def test_chart_mounts_ca_only_when_configured():
             deploy.ROOT / "tests/e2e/examples/values.example.yaml",
         ]
     )
-    assert "volumeMounts:" not in plain and "volumes:" not in plain
-    assert "volumeMounts:" in configured and "readOnly: true" in configured
+    assert "name: training-service-tmp" in plain
+    assert "mountPath: /tmp" in plain
+    assert "value: /tmp/huggingface" in plain
+    assert "name: ray-gateway-ca" not in plain
+    assert "name: ray-gateway-ca" in configured and "readOnly: true" in configured
 
 
 @pytest.mark.parametrize("kind", ["foreign", "active"])

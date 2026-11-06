@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import shlex
 import sys
@@ -11,18 +12,21 @@ from threading import Barrier
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 from codeflare_sdk import RayJob
 from codeflare_sdk.common.kubernetes_cluster import auth as codeflare_auth
 from codeflare_sdk.ray.rayjobs.config import build_ray_cluster_spec
 from codeflare_sdk.vendored.python_client.kuberay_cluster_api import RayClusterApi
 from codeflare_sdk.vendored.python_client.kuberay_job_api import RayjobApi
+from datasets.exceptions import DatasetNotFoundError
 from fastapi import Request
 from fastapi.testclient import TestClient
+from huggingface_hub.errors import RepositoryNotFoundError
 from kubernetes import client, config
 from kubernetes.client.exceptions import ApiException
 
-from training_service import jobs, kubernetes_client, ray_entrypoint
+from training_service import hf_dataset, jobs, kubernetes_client, ray_entrypoint
 from training_service import jobs as submission
 from training_service.algorithm_parameters import (
     load_algorithm_parameter_schemas,
@@ -319,7 +323,8 @@ class FakeCoreApi:
             keys = {"HF_TOKEN"}
         else:
             keys = {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_S3_ENDPOINT"}
-        return SimpleNamespace(data=dict.fromkeys(keys, "opaque-value"), string_data=None)
+        values = {key: base64.b64encode(b"secret-sentinel").decode() for key in keys}
+        return SimpleNamespace(data=values, string_data=None)
 
 
 class FakeRayJob:
@@ -344,6 +349,8 @@ def _mock_sdk(monkeypatch: pytest.MonkeyPatch) -> FakeCoreApi:
     monkeypatch.setattr(submission, "_caller_api_client", FakeApiClient)
     monkeypatch.setattr(submission.client, "CoreV1Api", lambda api_client: core)
     monkeypatch.setattr(submission, "_MetadataRayJob", FakeRayJob)
+    monkeypatch.setattr(submission, "validate_hf_model", lambda *_args: None)
+    monkeypatch.setattr(submission, "validate_hf_dataset", lambda *_args, **_kwargs: None)
     return core
 
 
@@ -1484,6 +1491,219 @@ def test_hf_dataset_config_and_split_reach_loader(
     result = ray_entrypoint._input(location, "dataset", tmp_path)
     assert recorded == {"name": "All", "split": "train[:10]", "token": "test-token"}
     assert result == str(tmp_path / "dataset.jsonl")
+
+
+@pytest.mark.parametrize("config", [None, "All"])
+def test_hf_config_preflight_passes_secret_and_optional_config_to_datasets(
+    monkeypatch: pytest.MonkeyPatch, config: str | None
+) -> None:
+    calls: list[tuple[str, str | None, str]] = []
+    builder = SimpleNamespace(
+        info=SimpleNamespace(splits={"train": SimpleNamespace(num_examples=100)})
+    )
+    monkeypatch.setattr(
+        hf_dataset,
+        "load_dataset_builder",
+        lambda repository, *, name, token: calls.append((repository, name, token)) or builder,
+    )
+
+    hf_dataset.validate_hf_dataset(
+        "LipengCS/Table-GPT", config, "train", "secret-sentinel", remote_loader=False
+    )
+
+    assert calls == [("LipengCS/Table-GPT", config, "secret-sentinel")]
+
+
+@pytest.mark.parametrize("config", [None, "not-a-config"])
+def test_hf_config_preflight_rejects_missing_or_invalid_config_without_leaking_token(
+    monkeypatch: pytest.MonkeyPatch, config: str | None
+) -> None:
+    def fail(*_args: Any, **_kwargs: Any) -> None:
+        reason = "Config name is missing" if config is None else "BuilderConfig not found"
+        raise ValueError(f"{reason}: secret-sentinel must not be exposed")
+
+    monkeypatch.setattr(hf_dataset, "load_dataset_builder", fail)
+
+    with pytest.raises(ApiError) as caught:
+        hf_dataset.validate_hf_dataset(
+            "LipengCS/Table-GPT", config, "train", "secret-sentinel", remote_loader=False
+        )
+
+    assert caught.value.status_code == 422
+    assert caught.value.code == "validation_error"
+    assert "dataset.config" in caught.value.message
+    assert "secret-sentinel" not in caught.value.message
+
+
+def test_hf_config_preflight_maps_remote_failure_without_leaking_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(*_args: Any, **_kwargs: Any) -> None:
+        raise ConnectionError("secret-sentinel must not be exposed")
+
+    monkeypatch.setattr(hf_dataset, "load_dataset_builder", fail)
+
+    with pytest.raises(ApiError) as caught:
+        hf_dataset.validate_hf_dataset(
+            "tatsu-lab/alpaca", None, "train", "secret-sentinel", remote_loader=False
+        )
+
+    assert caught.value.status_code == 503
+    assert caught.value.code == "submission_unavailable"
+    assert "secret-sentinel" not in caught.value.message
+
+
+def test_hf_dataset_value_error_does_not_mislabel_unrelated_failure_as_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(*_args: Any, **_kwargs: Any) -> None:
+        raise ValueError("invalid data files: secret-sentinel")
+
+    monkeypatch.setattr(hf_dataset, "load_dataset_builder", fail)
+
+    with pytest.raises(ApiError) as caught:
+        hf_dataset.validate_hf_dataset(
+            "my-org/data", None, "train", "secret-sentinel", remote_loader=False
+        )
+
+    assert caught.value.status_code == 422
+    assert "repository files" in caught.value.message
+    assert "dataset.config" not in caught.value.message
+    assert "secret-sentinel" not in caught.value.message
+
+
+def test_hf_dataset_preflight_rejects_inaccessible_repository(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(*_args: Any, **_kwargs: Any) -> None:
+        raise DatasetNotFoundError("secret-sentinel must not be exposed")
+
+    monkeypatch.setattr(hf_dataset, "load_dataset_builder", fail)
+
+    with pytest.raises(ApiError) as caught:
+        hf_dataset.validate_hf_dataset(
+            "missing/data", None, "train", "secret-sentinel", remote_loader=False
+        )
+
+    assert caught.value.status_code == 422
+    assert "dataset.uri" in caught.value.message
+    assert "Secret token" in caught.value.message
+    assert "secret-sentinel" not in caught.value.message
+
+
+@pytest.mark.parametrize("split", ["unknown", "train[bad]"])
+def test_hf_dataset_preflight_rejects_invalid_split(
+    monkeypatch: pytest.MonkeyPatch, split: str
+) -> None:
+    builder = SimpleNamespace(
+        info=SimpleNamespace(splits={"train": SimpleNamespace(num_examples=100)})
+    )
+    monkeypatch.setattr(hf_dataset, "load_dataset_builder", lambda *_args, **_kwargs: builder)
+
+    with pytest.raises(ApiError) as caught:
+        hf_dataset.validate_hf_dataset(
+            "tatsu-lab/alpaca", None, split, "secret", remote_loader=False
+        )
+
+    assert caught.value.status_code == 422
+    assert "dataset.split" in caught.value.message
+
+
+def test_hf_model_preflight_rejects_inaccessible_repository_without_leaking_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = httpx.Request("GET", "https://huggingface.co/api/models/missing/model")
+    response = httpx.Response(404, request=request)
+
+    def fail(*_args: Any, **_kwargs: Any) -> None:
+        raise RepositoryNotFoundError("secret-sentinel must not be exposed", response=response)
+
+    monkeypatch.setattr(hf_dataset, "HfApi", lambda: SimpleNamespace(model_info=fail))
+
+    with pytest.raises(ApiError) as caught:
+        hf_dataset.validate_hf_model("missing/model", "secret-sentinel")
+
+    assert caught.value.status_code == 422
+    assert "model.uri" in caught.value.message
+    assert "token permissions" in caught.value.message
+    assert "secret-sentinel" not in caught.value.message
+
+
+def test_remote_grpo_dataset_checks_repository_without_dataset_builder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def dataset_info(repository: str, *, token: str, timeout: int) -> None:
+        assert timeout == 10
+        calls.append((repository, token))
+
+    monkeypatch.setattr(hf_dataset, "HfApi", lambda: SimpleNamespace(dataset_info=dataset_info))
+    monkeypatch.setattr(
+        hf_dataset,
+        "load_dataset_builder",
+        lambda *_args, **_kwargs: pytest.fail("GRPO does not use datasets.load_dataset"),
+    )
+
+    hf_dataset.validate_hf_dataset(
+        "Agent-Ark/Toucan-1.5M", None, "train", "secret-sentinel", remote_loader=True
+    )
+
+    assert calls == [("Agent-Ark/Toucan-1.5M", "secret-sentinel")]
+
+
+def test_hf_config_preflight_rejects_before_rayjob_submission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_sdk(monkeypatch)
+    observed: list[tuple[str, str | None, str, str]] = []
+
+    def reject(
+        repository: str, config: str | None, split: str, token: str, *, remote_loader: bool
+    ) -> None:
+        assert not remote_loader
+        observed.append((repository, config, split, token))
+        raise ApiError(422, "validation_error", "dataset.config is required.")
+
+    monkeypatch.setattr(submission, "validate_hf_dataset", reject)
+    request = _sample("huggingface_inputs_s3_output")
+
+    with pytest.raises(ApiError, match="dataset.config is required"):
+        submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")._submit_sync(
+            "team-alpha", request, CallerIdentity("alice", None, ()), "caller-token"
+        )
+
+    assert observed == [("tatsu-lab/alpaca", None, "train", "secret-sentinel")]
+    assert not FakeRayJob.instances
+
+
+def test_hf_model_preflight_rejects_before_dataset_check_and_rayjob(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_sdk(monkeypatch)
+    observed: list[tuple[str, str]] = []
+
+    def reject(repository: str, token: str) -> None:
+        observed.append((repository, token))
+        raise ApiError(422, "validation_error", "model.uri is inaccessible.")
+
+    monkeypatch.setattr(submission, "validate_hf_model", reject)
+    monkeypatch.setattr(
+        submission,
+        "validate_hf_dataset",
+        lambda *_args, **_kwargs: pytest.fail("dataset check must not run after model failure"),
+    )
+
+    with pytest.raises(ApiError, match="model.uri is inaccessible"):
+        submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")._submit_sync(
+            "team-alpha",
+            _sample("huggingface_inputs_s3_output"),
+            CallerIdentity("alice", None, ()),
+            "caller-token",
+        )
+
+    assert observed == [("meta-llama/Llama-3.2-3B", "secret-sentinel")]
+    assert not FakeRayJob.instances
 
 
 def test_hf_dataset_options_are_preserved_in_submission(
