@@ -28,6 +28,7 @@ from pydantic import ValidationError as ModelValidationError
 from training_service.algorithm_parameters import validate_algorithm_parameters
 from training_service.auth import CallerIdentity
 from training_service.contract import component_validator
+from training_service.dataset_preflight import validate_dataset_columns, validate_dataset_location
 from training_service.errors import ApiError
 from training_service.hf_dataset import validate_hf_dataset, validate_hf_model
 from training_service.kubernetes_client import (
@@ -396,6 +397,7 @@ class CodeFlareJobBackend:
             backend.validate_locations(locations, parameters)
         except ValueError as error:
             raise _invalid(str(error)) from error
+        validate_dataset_location(locations["dataset"])
         payload = request.model_dump(mode="json", exclude_unset=True)
         serialized = json.dumps(payload, separators=(",", ":"), sort_keys=True)
         if len(serialized.encode("utf-8")) > 65536:
@@ -415,13 +417,14 @@ class CodeFlareJobBackend:
                     locations["model"]["repository"], hf_tokens[locations["model"]["name"]]
                 )
             if locations["dataset"]["scheme"] == "hf":
-                validate_hf_dataset(
+                columns = validate_hf_dataset(
                     locations["dataset"]["repository"],
                     locations["dataset"].get("config"),
                     locations["dataset"].get("split", "train"),
                     hf_tokens[locations["dataset"]["name"]],
                     remote_loader=backend.remote_hf,
                 )
+                validate_dataset_columns(request.algorithm.name, parameters, columns)
             gpu_type = resources.gpu_type or "nvidia.com/gpu"
             gpu_count = resources.gpus_per_node if resources.gpus_per_node is not None else 1
             cpu = resources.cpus_per_node or "4"

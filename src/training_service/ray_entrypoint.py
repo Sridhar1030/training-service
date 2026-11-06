@@ -15,6 +15,8 @@ from importlib import invalidate_caches
 from pathlib import Path
 from typing import Any
 
+SUPPORTED_DATASET_EXTENSIONS = frozenset({".jsonl", ".json", ".csv", ".parquet"})
+
 
 class TrainingBackend:
     """One supported Training Hub execution profile, shared by API and Ray driver."""
@@ -22,6 +24,10 @@ class TrainingBackend:
     name = ""
     backend_name = ""
     remote_hf = False
+
+    def required_dataset_columns(self, parameters: dict[str, Any], columns: set[str]) -> set[str]:
+        """Return columns that can be checked without reading training rows."""
+        return set()
 
     def validate_parameters(self, values: dict[str, Any]) -> dict[str, Any]:
         return values
@@ -100,6 +106,11 @@ class SFTBackend(SingleNodeTrainingBackend):
     name = "sft"
     backend_name = "instructlab-training"
 
+    def required_dataset_columns(self, parameters: dict[str, Any], columns: set[str]) -> set[str]:
+        if parameters.get("is_pretraining"):
+            return {parameters.get("document_column_name", "document")}
+        return {"messages"}
+
     def validate_parameters(self, values: dict[str, Any]) -> dict[str, Any]:
         _validate_pretraining(values)
         if ("beta1" in values) != ("beta2" in values):
@@ -126,6 +137,11 @@ class SFTBackend(SingleNodeTrainingBackend):
 class OSFTBackend(SFTBackend):
     name = "osft"
     backend_name = "mini-trainer"
+
+    def required_dataset_columns(self, parameters: dict[str, Any], columns: set[str]) -> set[str]:
+        if parameters.get("use_processed_dataset"):
+            return set()
+        return super().required_dataset_columns(parameters, columns)
 
     def validate_parameters(self, values: dict[str, Any]) -> dict[str, Any]:
         _validate_pretraining(values)
@@ -412,9 +428,13 @@ def _input(location: dict[str, Any], kind: str, workdir: Path, *, remote_hf: boo
     if scheme == "s3":
         path = Path(_download_s3(location, workdir / kind))
         if kind == "dataset" and path.is_dir():
-            candidates = sorted((*path.rglob("*.jsonl"), *path.rglob("*.json")))
+            candidates = sorted(
+                candidate
+                for candidate in path.rglob("*")
+                if candidate.is_file() and candidate.suffix.lower() in SUPPORTED_DATASET_EXTENSIONS
+            )
             if len(candidates) != 1:
-                raise ValueError("S3 dataset prefix must contain one JSON or JSONL file")
+                raise ValueError("S3 dataset prefix must contain exactly one supported data file")
             return str(candidates[0])
         return str(path)
     if scheme == "hf":

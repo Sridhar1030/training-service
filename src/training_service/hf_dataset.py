@@ -55,15 +55,15 @@ def validate_hf_dataset(
     token: str,
     *,
     remote_loader: bool,
-) -> None:
-    """Check repository access, config selection and known split metadata."""
+) -> set[str] | None:
+    """Check repository access, config/split and return known column metadata."""
     if remote_loader:
         # GRPO passes the repository ID to its own loader, not datasets.load_dataset.
         try:
             HfApi().dataset_info(repository, token=token, timeout=10)
         except Exception as error:
             raise _hub_error(error, "dataset.uri") from error
-        return
+        return None
 
     try:
         builder = load_dataset_builder(repository, name=config, token=token)
@@ -105,3 +105,5 @@ def validate_hf_dataset(
             "dataset.split is not valid for this Hugging Face dataset; "
             "check the available split names and slice syntax.",
         ) from error
+    features = getattr(builder.info, "features", None)
+    return set(features) if features is not None else None

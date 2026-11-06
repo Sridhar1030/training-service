@@ -35,6 +35,7 @@ from training_service.algorithm_parameters import (
 from training_service.auth import CallerIdentity
 from training_service.authorization import ProjectPermission
 from training_service.contract import load_contract
+from training_service.dataset_preflight import validate_dataset_columns, validate_dataset_location
 from training_service.errors import ApiError
 from training_service.main import create_app
 from training_service.ray_entrypoint import _dataset_format, get_backend
@@ -1512,6 +1513,121 @@ def test_hf_config_preflight_passes_secret_and_optional_config_to_datasets(
     )
 
     assert calls == [("LipengCS/Table-GPT", config, "secret-sentinel")]
+
+
+def test_hf_preflight_returns_known_columns_without_loading_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    builder = SimpleNamespace(
+        info=SimpleNamespace(
+            splits={"train": SimpleNamespace(num_examples=5)},
+            features={"instruction": object(), "output": object()},
+        )
+    )
+    monkeypatch.setattr(hf_dataset, "load_dataset_builder", lambda *_args, **_kwargs: builder)
+    assert hf_dataset.validate_hf_dataset(
+        "tatsu-lab/alpaca", None, "train", "secret", remote_loader=False
+    ) == {"instruction", "output"}
+
+
+@pytest.mark.parametrize(
+    "algorithm,parameters,columns,expected",
+    [
+        ("sft", {}, {"text"}, "messages"),
+        ("osft", {}, {"text"}, "messages"),
+        ("sft", {"is_pretraining": True}, {"text"}, "document"),
+        ("osft", {"is_pretraining": True}, {"text"}, "document"),
+        ("sft", {"is_pretraining": True, "document_column_name": "document"}, {"text"}, "document"),
+        ("lora_sft", {"dataset_type": "alpaca"}, {"question", "answer"}, None),
+        ("lora_sft", {}, {"instruction", "output"}, None),
+        ("lora_sft", {}, {"image", "caption"}, None),
+        ("lora_sft", {"dataset_type": "passthrough"}, {"text"}, None),
+        ("osft", {"use_processed_dataset": True}, {"input_ids"}, None),
+        ("lora_grpo", {}, {"messages"}, None),
+    ],
+)
+def test_dataset_columns_follow_training_hub_backend(
+    algorithm: str, parameters: dict[str, Any], columns: set[str], expected: str | None
+) -> None:
+    if expected is None:
+        validate_dataset_columns(algorithm, parameters, columns)
+    else:
+        with pytest.raises(ApiError) as caught:
+            validate_dataset_columns(algorithm, parameters, columns)
+        assert caught.value.status_code == 422
+        assert expected in caught.value.message
+
+
+def test_unknown_hf_columns_do_not_reject_submission() -> None:
+    validate_dataset_columns("sft", {}, None)
+    validate_dataset_columns("sft", {}, set())
+
+
+@pytest.mark.parametrize(
+    "path", ["train.jsonl", "train.json", "train.csv", "train.parquet", "data/"]
+)
+def test_s3_dataset_supported_file_shapes(path: str) -> None:
+    validate_dataset_location({"scheme": "s3", "path": path})
+
+
+@pytest.mark.parametrize("suffix", [".jsonl", ".json", ".csv", ".parquet"])
+def test_s3_prefix_selects_any_training_hub_file_format(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, suffix: str
+) -> None:
+    data_file = tmp_path / f"train{suffix}"
+    data_file.write_bytes(b"sample")
+    monkeypatch.setattr(ray_entrypoint, "_download_s3", lambda *_args: str(tmp_path))
+    assert ray_entrypoint._input(
+        {"scheme": "s3", "bucket": "bucket", "path": "datasets/"}, "dataset", tmp_path
+    ) == str(data_file)
+
+
+def test_s3_prefix_rejects_ambiguous_data_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / "train.csv").write_bytes(b"sample")
+    (tmp_path / "train.parquet").write_bytes(b"sample")
+    monkeypatch.setattr(ray_entrypoint, "_download_s3", lambda *_args: str(tmp_path))
+    with pytest.raises(ValueError, match="exactly one supported data file"):
+        ray_entrypoint._input(
+            {"scheme": "s3", "bucket": "bucket", "path": "datasets/"}, "dataset", tmp_path
+        )
+
+
+def test_s3_dataset_rejects_unreadable_object_type_before_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_sdk(monkeypatch)
+    payload = _sample().model_dump(mode="json", exclude_unset=True)
+    payload["dataset"]["uri"] = "s3://training-data/bucket/train.txt"
+    request = CreateJobRequest.model_validate(payload)
+    with pytest.raises(ApiError) as caught:
+        submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")._submit_sync(
+            "team-alpha", request, CallerIdentity("alice", None, ()), "caller-token"
+        )
+    assert caught.value.status_code == 422
+    assert "JSONL, JSON, CSV, or Parquet" in caught.value.message
+    assert not FakeRayJob.instances
+
+
+def test_hf_known_columns_reject_before_rayjob_submission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_sdk(monkeypatch)
+    monkeypatch.setattr(submission, "validate_hf_dataset", lambda *_args, **_kwargs: {"text"})
+    payload = _sample("huggingface_inputs_s3_output").model_dump(mode="json", exclude_unset=True)
+    payload["algorithm"] = {"name": "sft", "parameters": {"num_epochs": 1}}
+    request = CreateJobRequest.model_validate(payload)
+    with pytest.raises(ApiError) as caught:
+        submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")._submit_sync(
+            "team-alpha",
+            request,
+            CallerIdentity("alice", None, ()),
+            "caller-token",
+        )
+    assert caught.value.status_code == 422
+    assert "messages" in caught.value.message
+    assert not FakeRayJob.instances
 
 
 @pytest.mark.parametrize("config", [None, "not-a-config"])
