@@ -1,0 +1,34 @@
+{
+  "base_request": {
+    "backend": "ray",
+    "algorithm": {
+      "name": "lora_sft",
+      "parameters": {
+        "dataset_type": "alpaca",
+        "field_instruction": "instruction",
+        "field_output": "output",
+        "num_epochs": 1,
+        "effective_batch_size": 1,
+        "max_seq_len": 128,
+        "learning_rate": 0.0001
+      }
+    },
+    "resources": {
+      "num_nodes": 1,
+      "gpus_per_node": 1,
+      "cpus_per_node": "4",
+      "memory_per_node": "16Gi"
+    },
+    "output": {
+      "destination_uri": "s3://output-connection/my-test-bucket/e2e-output/"
+    }
+  },
+  "models": {
+    "s3": {"uri": "s3://input-connection/my-test-bucket/models/tiny-qwen/"},
+    "hf": {"uri": "hf://hf-token/Qwen/Qwen2.5-0.5B-Instruct"}
+  },
+  "datasets": {
+    "s3": {"uri": "s3://input-connection/my-test-bucket/datasets/tiny-alpaca.jsonl"},
+    "hf": {"uri": "hf://hf-token/my-org/tiny-alpaca", "split": "train"}
+  }
+}

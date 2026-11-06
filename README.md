@@ -12,7 +12,8 @@ remain fail-closed with `501`.
 POST dispatches through per-algorithm adapters to Training Hub algorithm/backend classes
 used by the [Ray fine-tuning examples](https://github.com/red-hat-data-services/red-hat-ai-examples/tree/main/examples/fine-tuning):
 `sft`, `osft`, `lora_sft`, and `lora_grpo`. Algorithm overrides are validated
-against the per-algorithm schemas in `docs/api/openapi.yaml`. Unsupported or
+against the service-owned catalog in
+`src/training_service/algorithm_parameter_schemas.yaml`, not OpenAPI. Unsupported or
 malformed overrides return `422` rather than being passed to Training Hub.
 Each adapter owns its additional validation, data preparation, and Ray
 entrypoint settings. Training Hub's `create_algorithm` selects the explicit backend

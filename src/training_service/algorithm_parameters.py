@@ -1,16 +1,36 @@
-"""Validate Training Hub overrides against the API's per-algorithm schemas."""
+"""Validate Training Hub overrides against the service's algorithm catalog."""
 
 from __future__ import annotations
 
 import math
 import re
+from functools import lru_cache
+from importlib.resources import files
 from typing import Any
 
+import yaml
 from jsonschema import Draft4Validator
 
-from training_service.contract import load_contract
 from training_service.errors import ApiError
 from training_service.ray_entrypoint import get_backend
+
+
+@lru_cache(maxsize=1)
+def load_algorithm_parameter_schemas() -> dict[str, dict[str, Any]]:
+    """Keep backend-specific validation independent of the public OpenAPI contract.
+
+    A future algorithm-discovery provider can replace this catalog without
+    changing the request model or the OpenAPI document.
+    """
+    source = files("training_service").joinpath("algorithm_parameter_schemas.yaml")
+    schemas = yaml.safe_load(source.read_text(encoding="utf-8"))
+    if not isinstance(schemas, dict) or not all(
+        isinstance(name, str) and isinstance(schema, dict) for name, schema in schemas.items()
+    ):
+        raise RuntimeError("Algorithm parameter catalog is invalid.")
+    for schema in schemas.values():
+        Draft4Validator.check_schema(schema)
+    return schemas
 
 
 def _finite(value: Any) -> bool:
@@ -25,7 +45,7 @@ def _finite(value: Any) -> bool:
 
 def validate_algorithm_parameters(name: str, parameters: dict[str, Any] | None) -> dict[str, Any]:
     """Return a validated copy; never pass unrecognized kwargs to Training Hub."""
-    schemas = load_contract()["components"]["schemas"]["AlgorithmSpec"]["x-parameter-schemas"]
+    schemas = load_algorithm_parameter_schemas()
     schema = schemas.get(name)
     if schema is None:
         raise ApiError(422, "validation_error", "Unsupported Training Hub algorithm.")

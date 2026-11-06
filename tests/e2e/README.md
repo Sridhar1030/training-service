@@ -76,6 +76,52 @@ matrix's algorithm-specific parameters are in
 detail. This is representative end-to-end coverage, not an exhaustive test of
 every optional Training Hub parameter.
 
+### Remote model/dataset inputs and S3 output
+
+`test_remote_storage.py` is an **opt-in live E2E matrix** for all four input
+combinations: S3/S3, S3/HF, HF/S3 and HF/HF (model/dataset). Each test submits
+`lora_sft` through the HTTP API, waits for `SUCCEEDED`, deletes its terminal
+RayJob, then reads back a valid LoRA adapter config and safetensors header from
+its unique S3 output prefix. A separate HTTP-negative test rejects HF as an
+output destination: the API contract supports S3 or PVC output, not HF publishing.
+This is not a mock and a `202` alone does not pass the test.
+
+Copy [`remote-jobs.example.json`](examples/remote-jobs.example.json) **outside
+the repository** and edit it for the target project. The named S3 connections
+must be project-local Secrets containing `AWS_S3_ENDPOINT`, `AWS_ACCESS_KEY_ID`
+and `AWS_SECRET_ACCESS_KEY` (optional `AWS_DEFAULT_REGION`/`AWS_SESSION_TOKEN`).
+The HF Secret needs `HF_TOKEN` or `token`, even for public repositories. Stage a
+small model snapshot in the S3 model prefix and a small Alpaca JSONL file at the
+S3 dataset key. Set the HF dataset repository to a small `train` split with the
+same `instruction`/`output` columns. The two models/datasets need to be
+compatible with the fixture's LoRA parameters and runtime. The example names
+and repositories are illustrative, **not pre-provisioned fixtures**. The API
+caller must be authorized to read the named Secrets and create RayJobs.
+
+Use a verifier identity with S3 read access to the **same output bucket**. It is
+separate from the project-local connection Secret, and credentials are supplied
+only through environment variables, never JSON or test reports:
+
+```bash
+export TRAINING_SERVICE_URL='https://YOUR_TRAINING_SERVICE_ROUTE'
+export TRAINING_SERVICE_PROJECT='YOUR_PROJECT'
+# Use an existing oc login, or set TRAINING_SERVICE_TOKEN explicitly.
+export TRAINING_S3_E2E_ENDPOINT='https://YOUR_S3_ENDPOINT'
+export TRAINING_S3_E2E_BUCKET='my-test-bucket'
+export TRAINING_S3_E2E_ACCESS_KEY='...'
+export TRAINING_S3_E2E_SECRET_KEY='...'
+uv run --locked --with boto3==1.40.61 pytest tests/e2e/test_remote_storage.py \
+  --remote-fixtures-file /path/outside/repo/remote-jobs.json
+```
+
+Optional verifier settings: `TRAINING_S3_E2E_REGION`,
+`TRAINING_S3_E2E_SESSION_TOKEN`, `TRAINING_S3_E2E_CA_BUNDLE`. The test never
+creates Secrets or copies credentials into the cluster. It deletes only its own
+terminal API jobs; S3 output objects remain in the unique per-job prefix for
+inspection and should be removed separately when no longer needed. Without the
+fixture flag, these four tests skip visibly. Missing verifier settings fail
+preflight rather than silently skipping selected remote tests.
+
 Both E2E commands use `oc whoami -t` from your current login when
 `TRAINING_SERVICE_TOKEN` is unset or blank. No manual token export is needed.
 Set `TRAINING_SERVICE_TOKEN` explicitly to use another API caller, or to test an

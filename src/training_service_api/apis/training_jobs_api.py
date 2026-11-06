@@ -265,15 +265,7 @@ async def create_training_job(
                 "backend": "ray",
                 "model": {"uri": "hf://hf-secret-token/meta-llama/Llama-3.2-3B"},
                 "dataset": {"uri": "hf://hf-secret-token/tatsu-lab/alpaca"},
-                "algorithm": {
-                    "name": "lora_sft",
-                    "parameters": {
-                        "learning_rate": 2.0e-5,
-                        "num_epochs": 3,
-                        "effective_batch_size": 8,
-                        "max_seq_len": 2048,
-                    },
-                },
+                "algorithm": {"name": "lora_sft"},
                 "resources": {
                     "num_nodes": 1,
                     "gpus_per_node": 1,

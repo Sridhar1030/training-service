@@ -20,30 +20,19 @@ class AlgorithmSpec(ContractModel):
 
     name: StrictStr = Field(
         description=(
-            "Training Hub algorithm identifier for the configured Ray image. This "
-            "submission adapter supports sft, osft, lora_sft, and lora_grpo. "
+            "Training algorithm identifier. Support depends on the selected "
+            "backend and runtime and is validated at submission. "
         ),
         json_schema_extra={"examples": ["lora_sft"]},
     )
     parameters: dict[str, Any] | None = Field(
         default=None,
         description=(
-            "Algorithm-specific Training Hub overrides. Only parameters in the "
-            "selected x-parameter-schemas entry are accepted. GPU and node counts "
-            "come from resources, not algorithm parameters. Omitted overrides use "
-            "the Training Hub backend's defaults. OSFT requires its five training "
-            "parameters because its callable has no defaults for them. "
+            "Backend-specific training overrides. Accepted keys and constraints "
+            "are validated by the service rather than enumerated in this API "
+            "contract. Omitted overrides use backend defaults. Worker and GPU "
+            "topology belongs in resources, not algorithm parameters. "
         ),
-        json_schema_extra={
-            "examples": [
-                {
-                    "learning_rate": 2.0e-5,
-                    "num_epochs": 3,
-                    "effective_batch_size": 8,
-                    "max_seq_len": 2048,
-                }
-            ]
-        },
     )
 
     model_config = ConfigDict(

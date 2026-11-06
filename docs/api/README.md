@@ -4,6 +4,11 @@
 Generation does not modify its endpoints or schemas. The POST-only
 `x-submission-context` vendor extension controls generated dispatch and
 response handling without changing the public wire schema.
+Algorithm-specific parameter validation lives in
+`src/training_service/algorithm_parameter_schemas.yaml` instead of the public
+contract. The OpenAPI request keeps a generic `algorithm.parameters` object;
+future algorithm discovery can replace the service-owned catalog without
+regenerating API models for every backend parameter change.
 
 Generate with a running Podman or Docker engine:
 

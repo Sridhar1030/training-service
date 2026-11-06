@@ -24,7 +24,10 @@ from kubernetes.client.exceptions import ApiException
 
 from training_service import jobs, kubernetes_client, ray_entrypoint
 from training_service import jobs as submission
-from training_service.algorithm_parameters import validate_algorithm_parameters
+from training_service.algorithm_parameters import (
+    load_algorithm_parameter_schemas,
+    validate_algorithm_parameters,
+)
 from training_service.auth import CallerIdentity
 from training_service.authorization import ProjectPermission
 from training_service.contract import load_contract
@@ -39,7 +42,17 @@ def _sample(name: str = "pvc_inputs_output") -> CreateJobRequest:
     examples = load_contract()["paths"]["/projects/{project}/training-jobs"]["post"]["requestBody"][
         "content"
     ]["application/json"]["examples"]
-    return CreateJobRequest.model_validate(examples[name]["value"])
+    payload = examples[name]["value"].copy()
+    payload["algorithm"] = payload["algorithm"].copy()
+    if name == "pvc_inputs_output":
+        # Keep test-specific overrides here, not in the generic API contract.
+        payload["algorithm"]["parameters"] = {
+            "learning_rate": 2e-5,
+            "num_epochs": 3,
+            "effective_batch_size": 8,
+            "max_seq_len": 2048,
+        }
+    return CreateJobRequest.model_validate(payload)
 
 
 class FakeAuthenticator:
@@ -906,13 +919,16 @@ def test_all_post_contract_examples_match_algorithm_validation() -> None:
     examples = load_contract()["paths"]["/projects/{project}/training-jobs"]["post"]["requestBody"][
         "content"
     ]["application/json"]["examples"]
-    for name in examples:
-        submission._validate_request(_sample(name))
+    for example in examples.values():
+        submission._validate_request(CreateJobRequest.model_validate(example["value"]))
 
 
 def test_parameter_schemas_match_registered_training_backends() -> None:
-    schemas = load_contract()["components"]["schemas"]["AlgorithmSpec"]["x-parameter-schemas"]
+    schemas = load_algorithm_parameter_schemas()
     assert set(schemas) == set(ray_entrypoint._BACKENDS)
+    algorithm_spec = load_contract()["components"]["schemas"]["AlgorithmSpec"]
+    assert "x-parameter-schemas" not in algorithm_spec
+    assert "properties" not in algorithm_spec["properties"]["parameters"]
     for name in schemas:
         assert get_backend(name).name == name
     with pytest.raises(ValueError, match="Unsupported Training Hub algorithm"):
@@ -1135,7 +1151,7 @@ def test_osft_integral_json_numbers_are_normalized_for_training_hub_float_checks
 def test_every_exposed_algorithm_override_reaches_training_hub(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, algorithm: str
 ) -> None:
-    schemas = load_contract()["components"]["schemas"]["AlgorithmSpec"]["x-parameter-schemas"]
+    schemas = load_algorithm_parameter_schemas()
     properties = schemas[algorithm]["properties"]
     values: dict[str, Any] = {}
     for key, spec in properties.items():

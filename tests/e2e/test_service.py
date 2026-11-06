@@ -264,6 +264,7 @@ def test_invalid_log_queries(api, missing_job_id, follow, tail):
         "invalid_backend",
         "kft",
         "empty_queue",
+        "hf_output",
     ],
 )
 def test_rejected_submission_creates_no_job(api, missing_job_id, pytestconfig, variation):
@@ -306,6 +307,8 @@ def test_rejected_submission_creates_no_job(api, missing_job_id, pytestconfig, v
         payload["backend"] = "kft" if variation == "kft" else "unknown"
     if variation == "empty_queue":
         payload["queue_name"] = ""
+    if variation == "hf_output":
+        payload["output"] = {"destination_uri": "hf://e2e-missing-input/org/repository"}
     try:
         response = api.request(
             "POST", api.jobs, expected=501 if variation == "kft" else 422, json=payload

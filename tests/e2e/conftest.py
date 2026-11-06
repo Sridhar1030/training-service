@@ -26,6 +26,10 @@ def pytest_addoption(parser):
     group = parser.getgroup("live Training Service")
     group.addoption("--job-file", help="Opt into real training using this JSON request file.")
     group.addoption(
+        "--remote-fixtures-file",
+        help="Run the S3/HF source matrix with S3 output using this JSON fixture file.",
+    )
+    group.addoption(
         "--algorithm-matrix",
         action="store_true",
         help="Run real sft, osft, lora_sft and lora_grpo jobs against prepared PVC fixtures.",
@@ -99,6 +103,31 @@ def pytest_configure(config):
             "observe_cluster"
         ):
             raise pytest.UsageError("Kueue enabled/absent proof requires --observe-cluster")
+    if filename := config.getoption("remote_fixtures_file"):
+        from tests.e2e.support import remote_workloads, s3_path
+
+        try:
+            remote_cases = remote_workloads(filename)
+        except ValueError as error:
+            raise pytest.UsageError(str(error)) from None
+        required = (
+            "TRAINING_S3_E2E_ENDPOINT",
+            "TRAINING_S3_E2E_BUCKET",
+            "TRAINING_S3_E2E_ACCESS_KEY",
+            "TRAINING_S3_E2E_SECRET_KEY",
+        )
+        missing = [name for name in required if not os.getenv(name)]
+        if missing:
+            raise pytest.UsageError("Remote E2E S3 verification requires: " + ", ".join(missing))
+        output_uri = remote_cases["s3_model_s3_dataset"]["output"]["destination_uri"]
+        if s3_path(output_uri)[0] != os.environ["TRAINING_S3_E2E_BUCKET"]:
+            raise pytest.UsageError("Remote E2E output bucket must match TRAINING_S3_E2E_BUCKET")
+        try:
+            import boto3  # noqa: F401
+        except ImportError:
+            raise pytest.UsageError(
+                "Remote E2E S3 verification requires boto3; run uv run --with boto3 pytest ..."
+            ) from None
     if config.getoption("artifact_pod") and not config.getoption("observe_cluster"):
         raise pytest.UsageError("--artifact-pod requires --observe-cluster")
     if config.getoption("showlocals") or config.getini("log_cli"):
