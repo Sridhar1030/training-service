@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 from training_service.api_impl import observability, training_jobs  # noqa: F401
 from training_service.auth import KubernetesTokenAuthenticator, OpenShiftTokenAuthenticator
 from training_service.authorization import KubernetesProjectAuthorizer, OpenShiftProjectAuthorizer
-from training_service.contract import contract_document, load_contract
+from training_service.contract import component_validator, contract_document, load_contract
 from training_service.errors import ApiError
 from training_service.jobs import CodeFlareJobBackend, JobsBackend, JobSubmitter
 from training_service_api.apis.estimations_api import router as estimations_router
@@ -20,6 +20,51 @@ from training_service_api.apis.training_jobs_api import router as jobs_router
 from training_service_api.models.error_response import ErrorResponse
 
 _SUBMISSION_PATH = re.compile(r"^/api/v1/projects/[^/]+/training-jobs$")
+_SAFE_FIELD = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
+
+
+def _submission_validation_message(body: object) -> str:
+    """Explain contract failures using field names, never user-supplied values."""
+    if not isinstance(body, dict):
+        return "Request body must be a JSON object."
+    issue = next(component_validator("CreateJobRequest").iter_errors(body), None)
+    if issue is None:
+        return "Request does not match the API contract."
+    path = [str(part) for part in issue.path]
+    if any(_SAFE_FIELD.fullmatch(part) is None for part in path):
+        return "Request does not match the API contract."
+    field = ".".join(path)
+    if issue.validator == "required" and isinstance(issue.instance, dict):
+        missing = next((key for key in issue.validator_value if key not in issue.instance), None)
+        if isinstance(missing, str) and _SAFE_FIELD.fullmatch(missing):
+            return f"Missing required field: {field + '.' if field else ''}{missing}."
+    if issue.validator == "additionalProperties" and isinstance(issue.instance, dict):
+        known = issue.schema.get("properties", {})
+        extra = next((key for key in issue.instance if key not in known), None)
+        if isinstance(extra, str) and _SAFE_FIELD.fullmatch(extra):
+            return f"Unsupported field: {field + '.' if field else ''}{extra}."
+    if field:
+        if issue.validator == "maxLength":
+            return f"{field} must be at most {issue.validator_value} characters."
+        if issue.validator == "minLength":
+            return f"{field} must be at least {issue.validator_value} character(s)."
+        if issue.validator == "type":
+            expected = issue.validator_value
+            if isinstance(expected, list):
+                return f"{field} must be one of these types: {', '.join(expected)}."
+            article = "an" if expected in {"integer", "object", "array"} else "a"
+            return f"{field} must be {article} {expected}."
+        if issue.validator in {"minimum", "maximum"}:
+            direction = "greater" if issue.validator == "minimum" else "less"
+            exclusive = issue.schema.get("exclusive" + issue.validator.title(), False)
+            comparator = " than" if exclusive else " than or equal to"
+            return f"{field} must be {direction}{comparator} {issue.validator_value}."
+        if issue.validator == "pattern":
+            return f"{field} has an invalid format."
+        if issue.validator == "enum":
+            return f"{field} has an unsupported value."
+        return f"Invalid value for {field}."
+    return "Request does not match the API contract."
 
 
 def create_app(
@@ -86,6 +131,8 @@ def create_app(
                 "message": (
                     "Malformed JSON request body."
                     if malformed_json
+                    else _submission_validation_message(error.body)
+                    if _SUBMISSION_PATH.fullmatch(request.url.path)
                     else "Request does not match the API contract."
                 ),
             },

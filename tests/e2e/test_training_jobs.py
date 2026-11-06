@@ -11,6 +11,8 @@ from pathlib import Path
 import httpx
 import pytest
 
+from tests.e2e.algorithms import ALGORITHMS
+
 TERMINAL = {"SUCCEEDED", "FAILED", "STOPPED"}
 
 
@@ -83,6 +85,18 @@ def test_training_job_lifecycle(api, training_job, pytestconfig, observer, reque
         raise
 
 
+@pytest.mark.parametrize("training_job", ALGORITHMS, indirect=True, ids=ALGORITHMS)
+def test_algorithm_lifecycle(api, training_job, pytestconfig, observer, request):
+    """Each supported algorithm must complete, preserve overrides and clean up."""
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            lifecycle(api, training_job, pytestconfig, observer, executor)
+    except (AssertionError, pytest.fail.Exception):
+        if observer and observer.queue:
+            request.node.user_properties.append(("observer_failure", observer.queue_diagnostic()))
+        raise
+
+
 def lifecycle(api, training_job, pytestconfig, observer, executor):
     job_id, payload = training_job
     path = f"{api.jobs}/{job_id}"
@@ -106,12 +120,15 @@ def lifecycle(api, training_job, pytestconfig, observer, executor):
     assert detail.get("selected_backend") == payload.get("backend", "ray")
     if "queue_name" in payload:
         assert detail.get("queue_name") == payload["queue_name"]
-    if "resources" in payload:
+    # A GPU-free GRPO head makes node groups heterogeneous; the service omits resources.
+    if "resources" in payload and payload["algorithm"]["name"] != "lora_grpo":
         assert detail.get("resources")
         for key, value in payload["resources"].items():
             assert detail["resources"].get(key) == value, (
                 "Observed resources differ from submission"
             )
+    elif "resources" in payload:
+        assert "resources" not in detail
 
     duplicate = api.request("POST", api.jobs, expected=409, json=payload)
     api.error(
@@ -200,7 +217,7 @@ def lifecycle(api, training_job, pytestconfig, observer, executor):
             )
         except Exception:
             pytest.fail(
-                "LoRA checkpoint verification failed; inspect retained output directory",
+                "Training output verification failed; inspect retained output directory",
                 pytrace=False,
             )
 
@@ -235,4 +252,10 @@ def lifecycle(api, training_job, pytestconfig, observer, executor):
             "queue_admitted": bool(observer and observer.admitted),
             "artifacts": artifact_result or "not verified: no --artifact-pod selected",
         }
-        (Path(directory) / "lifecycle.json").write_text(json.dumps(evidence, indent=2) + "\n")
+        name = payload["algorithm"]["name"]
+        filename = (
+            f"lifecycle-{name}.json"
+            if pytestconfig.getoption("algorithm_matrix")
+            else "lifecycle.json"
+        )
+        (Path(directory) / filename).write_text(json.dumps(evidence, indent=2) + "\n")

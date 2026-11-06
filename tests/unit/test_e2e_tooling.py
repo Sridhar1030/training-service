@@ -15,6 +15,7 @@ from kubernetes.client.exceptions import ApiException
 from tests.e2e import conftest as live_config
 from tests.e2e import deploy, support
 from tests.e2e import test_training_jobs as training_jobs
+from tests.e2e.algorithms import ALGORITHMS, algorithm_workload
 from tests.e2e.conftest import LiveAPI
 from tests.e2e.environment import (
     RUN_LABEL,
@@ -49,6 +50,32 @@ def test_profiles_require_omitted_queue_and_explicit_selection(jobfile):
     payload["queue_name"] = "prepared-local-queue"
     jobfile.write_text(json.dumps(payload))
     assert workload(jobfile, "with-kueue")["queue_name"] == "prepared-local-queue"
+
+
+@pytest.mark.parametrize("algorithm", ALGORITHMS)
+def test_algorithm_matrix_workloads_match_submission_validation(jobfile, algorithm):
+    from training_service.algorithm_parameters import validate_algorithm_parameters
+    from training_service.ray_entrypoint import get_backend
+
+    original = json.loads(jobfile.read_text())
+    original["dataset"]["uri"] = "pvc://e2e-storage/datasets/tiny-chat.jsonl"
+    payload = algorithm_workload(original, algorithm)
+    assert original["algorithm"]["name"] == "lora_sft"
+    assert payload["algorithm"]["name"] == algorithm
+    assert payload["dataset"]["uri"].startswith("pvc://e2e-storage/datasets/")
+    parameters = validate_algorithm_parameters(algorithm, payload["algorithm"]["parameters"])
+    resources = payload["resources"]
+    get_backend(algorithm).validate_resources(
+        resources["gpus_per_node"], resources["num_nodes"], resources["gpu_type"], parameters
+    )
+
+
+def test_algorithm_matrix_rejects_unshared_grpo_output(jobfile):
+    payload = json.loads(jobfile.read_text())
+    payload["dataset"]["uri"] = "pvc://e2e-storage/datasets/tiny-chat.jsonl"
+    payload["output"]["destination_uri"] = "s3://credentials/bucket/output/"
+    with pytest.raises(ValueError, match="shared PVC output"):
+        algorithm_workload(payload, "lora_grpo")
 
 
 @pytest.mark.parametrize(
@@ -295,8 +322,9 @@ def test_partial_setup_failure_or_interruption_still_cleans_owned_namespace(
 @pytest.mark.parametrize("reuse", [False, True])
 @pytest.mark.parametrize("private", [False, True])
 @pytest.mark.parametrize("cleanup_failure", [None, "error", "interrupt"])
+@pytest.mark.parametrize("matrix", [False, True])
 def test_runner_build_push_digest_install_test_cleanup(
-    monkeypatch, tmp_path, failure, keep, missing_evidence, reuse, private, cleanup_failure
+    monkeypatch, tmp_path, failure, keep, missing_evidence, reuse, private, cleanup_failure, matrix
 ):
     values = tmp_path / "values.yaml"
     values.write_text("env: []\n")
@@ -310,6 +338,7 @@ def test_runner_build_push_digest_install_test_cleanup(
             str(values),
             "--results-dir",
             str(tmp_path / "results"),
+            *(["--algorithm-matrix"] if matrix else []),
             *(["--keep-resources"] if keep else []),
             *(["--use-podman-auth"] if private else []),
             *(
@@ -370,23 +399,27 @@ def test_runner_build_push_digest_install_test_cleanup(
         if "pytest" in command:
             assert kwargs["cleanup_timeout"] == args.cleanup_timeout
             assert kwargs["env"]["TRAINING_SERVICE_CA_BUNDLE"] == str(args.ingress_ca_bundle)
+            assert ("--algorithm-matrix" in command) == matrix
             if failure:
                 raise RuntimeError("live tests failed")
             if missing_evidence:
                 return ""
             results = Path(kwargs["env"]["TRAINING_SERVICE_EVIDENCE_DIR"])
-            (results / "lifecycle.json").write_text(
-                json.dumps(
-                    {
-                        "succeeded": True,
-                        "queue_admitted": True,
-                        "gpu_cleanup": True,
-                        "snapshot_logs": True,
-                        "sse": True,
-                        "artifacts": {"adapters": 1},
-                    }
+            names = ALGORITHMS if matrix else (None,)
+            for name in names:
+                filename = f"lifecycle-{name}.json" if name else "lifecycle.json"
+                (results / filename).write_text(
+                    json.dumps(
+                        {
+                            "succeeded": True,
+                            "queue_admitted": True,
+                            "gpu_cleanup": True,
+                            "snapshot_logs": True,
+                            "sse": not matrix,
+                            "artifacts": {"nonempty_output_files": 1},
+                        }
+                    )
                 )
-            )
         return ""
 
     monkeypatch.setattr(deploy, "command", run)
@@ -422,12 +455,12 @@ def test_runner_build_push_digest_install_test_cleanup(
     invocation = next(c for c in commands if "pytest" in c)
     assert invocation[invocation.index("--queue-profile") + 1] == "with-kueue"
     assert "--maxfail=0" in invocation
-    assert {"--job-file", "--artifact-pod", "--observe-cluster", "--check-stream"} <= set(
-        invocation
-    )
+    assert {"--job-file", "--artifact-pod", "--observe-cluster"} <= set(invocation)
+    assert ("--check-stream" in invocation) != matrix
     environment.provision.assert_called_once()
     assert environment.cleanup.called == (not keep)
     report = json.loads(next((tmp_path / "results").glob("*/run.json")).read_text())
+    assert report["algorithm_matrix"] is matrix
     assert report["outcome"] == (
         "cleanup_failed" if cleanup_failed else "failed" if failed else "passed"
     )
@@ -1254,8 +1287,11 @@ def test_chart_mounts_ca_only_when_configured():
             deploy.ROOT / "tests/e2e/examples/values.example.yaml",
         ]
     )
-    assert "volumeMounts:" not in plain and "volumes:" not in plain
-    assert "volumeMounts:" in configured and "readOnly: true" in configured
+    assert "name: training-service-tmp" in plain
+    assert "mountPath: /tmp" in plain
+    assert "value: /tmp/huggingface" in plain
+    assert "name: ray-gateway-ca" not in plain
+    assert "name: ray-gateway-ca" in configured and "readOnly: true" in configured
 
 
 @pytest.mark.parametrize("kind", ["foreign", "active"])

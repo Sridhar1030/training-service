@@ -12,6 +12,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from tests.e2e.algorithms import algorithm_workload
 from tests.e2e.support import PROFILES, api_token, namespace, workload
 
 TERMINAL = {"SUCCEEDED", "FAILED", "STOPPED"}
@@ -24,6 +25,15 @@ FAILURES = []
 def pytest_addoption(parser):
     group = parser.getgroup("live Training Service")
     group.addoption("--job-file", help="Opt into real training using this JSON request file.")
+    group.addoption(
+        "--remote-fixtures-file",
+        help="Run the S3/HF source matrix with S3 output using this JSON fixture file.",
+    )
+    group.addoption(
+        "--algorithm-matrix",
+        action="store_true",
+        help="Run real sft, osft, lora_sft and lora_grpo jobs against prepared PVC fixtures.",
+    )
     group.addoption("--job-timeout", type=int, default=1800, help="Training deadline in seconds.")
     group.addoption("--cleanup-timeout", type=int, default=180, help="Cleanup deadline in seconds.")
     group.addoption("--request-timeout", type=int, default=30, help="HTTP timeout in seconds.")
@@ -80,6 +90,7 @@ def pytest_configure(config):
         "observe_cluster",
         "artifact_pod",
         "queue_profile",
+        "algorithm_matrix",
     ):
         if config.getoption(option) and not config.getoption("job_file"):
             raise pytest.UsageError(f"--{option.replace('_', '-')} requires --job-file")
@@ -92,6 +103,31 @@ def pytest_configure(config):
             "observe_cluster"
         ):
             raise pytest.UsageError("Kueue enabled/absent proof requires --observe-cluster")
+    if filename := config.getoption("remote_fixtures_file"):
+        from tests.e2e.support import remote_workloads, s3_path
+
+        try:
+            remote_cases = remote_workloads(filename)
+        except ValueError as error:
+            raise pytest.UsageError(str(error)) from None
+        required = (
+            "TRAINING_S3_E2E_ENDPOINT",
+            "TRAINING_S3_E2E_BUCKET",
+            "TRAINING_S3_E2E_ACCESS_KEY",
+            "TRAINING_S3_E2E_SECRET_KEY",
+        )
+        missing = [name for name in required if not os.getenv(name)]
+        if missing:
+            raise pytest.UsageError("Remote E2E S3 verification requires: " + ", ".join(missing))
+        output_uri = remote_cases["s3_model_s3_dataset"]["output"]["destination_uri"]
+        if s3_path(output_uri)[0] != os.environ["TRAINING_S3_E2E_BUCKET"]:
+            raise pytest.UsageError("Remote E2E output bucket must match TRAINING_S3_E2E_BUCKET")
+        try:
+            import boto3  # noqa: F401
+        except ImportError:
+            raise pytest.UsageError(
+                "Remote E2E S3 verification requires boto3; run uv run --with boto3 pytest ..."
+            ) from None
     if config.getoption("artifact_pod") and not config.getoption("observe_cluster"):
         raise pytest.UsageError("--artifact-pod requires --observe-cluster")
     if config.getoption("showlocals") or config.getini("log_cli"):
@@ -296,11 +332,22 @@ def forbidden_project(pytestconfig):
 
 
 @pytest.fixture
-def training_job(api, pytestconfig):
+def training_job(api, pytestconfig, request):
+    algorithm = getattr(request, "param", None)
+    matrix = pytestconfig.getoption("algorithm_matrix")
+    if matrix and algorithm is None:
+        pytest.skip("The algorithm matrix replaces the baseline LoRA lifecycle")
+    if algorithm is not None and not matrix:
+        pytest.skip("Pass --algorithm-matrix to run all four live Training Hub algorithms")
     filename = pytestconfig.getoption("job_file")
     if not filename:
         pytest.skip("Real training is opt-in: pass --job-file /path/to/request.json")
     payload = workload(filename, pytestconfig.getoption("queue_profile"))
+    if algorithm is not None:
+        try:
+            payload = algorithm_workload(payload, algorithm)
+        except ValueError as error:
+            raise pytest.UsageError(str(error)) from None
     # RHOAI adds cluster suffixes and an auth-volume prefix with a 63-char limit.
     job_id = "e2e-" + uuid.uuid4().hex[:16]
     payload["name"] = job_id
@@ -339,6 +386,11 @@ def observer(api, pytestconfig, request):
         payload = workload(
             pytestconfig.getoption("job_file"), pytestconfig.getoption("queue_profile")
         )
+        algorithm = getattr(getattr(request.node, "callspec", None), "params", {}).get(
+            "training_job"
+        )
+        if algorithm is not None:
+            payload = algorithm_workload(payload, algorithm)
         result.preflight(payload, pytestconfig.getoption("queue_profile"))
         if pod := pytestconfig.getoption("artifact_pod"):
             result.artifact_mount(pod, pytestconfig.getoption("artifact_container"), payload)

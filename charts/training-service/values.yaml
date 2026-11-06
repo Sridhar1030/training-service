@@ -31,6 +31,12 @@ authentication:
 env: []
 envFrom: []
 
+# The read-only container needs bounded scratch space for Python tempfile and
+# Hugging Face dataset metadata/cache during submission preflight.
+writableTemp:
+  enabled: true
+  sizeLimit: 512Mi
+
 # For example, mount a ConfigMap containing the trusted Ray gateway CA.
 volumes: []
 volumeMounts: []

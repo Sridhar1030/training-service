@@ -20,33 +20,19 @@ class AlgorithmSpec(ContractModel):
 
     name: StrictStr = Field(
         description=(
-            "Algorithm identifier exposed by GET /algorithms for the configured "
-            "Ray Universal Image and release. Use that catalog and its parameter "
-            "schema. "
+            "Training algorithm identifier. Support depends on the selected "
+            "backend and runtime and is validated at submission. "
         ),
         json_schema_extra={"examples": ["lora_sft"]},
     )
     parameters: dict[str, Any] | None = Field(
         default=None,
         description=(
-            "Optional hyperparameter overrides validated against the selected "
-            "algorithm's Training Hub parameter schema. Basic lora_sft overrides "
-            "include learning_rate, num_epochs, effective_batch_size (total "
-            "samples per optimizer update across GPUs and gradient accumulation), "
-            "and max_seq_len (maximum tokens per training sample). These are "
-            "optional overrides; example values are not API defaults. Omitted "
-            "parameters use the configured backend's defaults. "
+            "Backend-specific training overrides. Accepted keys and constraints "
+            "are validated by the service rather than enumerated in this API "
+            "contract. Omitted overrides use backend defaults. Worker and GPU "
+            "topology belongs in resources, not algorithm parameters. "
         ),
-        json_schema_extra={
-            "examples": [
-                {
-                    "learning_rate": 2.0e-5,
-                    "num_epochs": 3,
-                    "effective_batch_size": 8,
-                    "max_seq_len": 2048,
-                }
-            ]
-        },
     )
 
     model_config = ConfigDict(

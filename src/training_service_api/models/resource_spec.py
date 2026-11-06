@@ -27,9 +27,9 @@ class ResourceSpec(ContractModel):
     gpu_type: StrictStr | None = Field(
         default=None, json_schema_extra={"examples": ["nvidia.com/gpu"]}
     )
-    cpus_per_node: StrictStr | None = Field(default="8", json_schema_extra={"examples": ["16"]})
+    cpus_per_node: StrictStr | None = Field(default="4", json_schema_extra={"examples": ["4"]})
     memory_per_node: StrictStr | None = Field(
-        default="32Gi", json_schema_extra={"examples": ["64Gi"]}
+        default="16Gi", json_schema_extra={"examples": ["16Gi"]}
     )
 
     model_config = ConfigDict(

@@ -118,6 +118,11 @@ def arguments(argv=None):
     parser.add_argument("--deploy-timeout", type=int, default=300)
     parser.add_argument("--fixture-timeout", type=int, default=900)
     parser.add_argument("--job-timeout", type=int, default=1800)
+    parser.add_argument(
+        "--algorithm-matrix",
+        action="store_true",
+        help="Run all four supported Training Hub algorithms instead of baseline LoRA only",
+    )
     parser.add_argument("--stream-timeout", type=int, default=60)
     parser.add_argument("--cleanup-timeout", type=int, default=180)
     parser.add_argument("--results-dir", type=Path, default=ROOT / "artifacts/e2e")
@@ -221,6 +226,7 @@ def run(args):
         "namespace": args.namespace,
         "release": release,
         "profile": "with-kueue",
+        "algorithm_matrix": args.algorithm_matrix,
         "outcome": "incomplete",
         "chart_sha256": hashlib.sha256(
             b"".join(p.read_bytes() for p in sorted(CHART.rglob("*")) if p.is_file())
@@ -437,12 +443,15 @@ def run(args):
             "with-kueue",
             "--observe-cluster",
             "--check-logs",
-            "--check-stream",
             "--artifact-pod",
             args.artifact_pod,
             "--artifact-container",
             args.artifact_container,
         ]
+        if args.algorithm_matrix:
+            test_args.append("--algorithm-matrix")
+        else:
+            test_args.append("--check-stream")
         if args.forbidden_project:
             test_args += ["--forbidden-project", args.forbidden_project]
         print(f"Testing {url}; results: {results}", flush=True)
@@ -455,13 +464,23 @@ def run(args):
             cleanup_timeout=args.cleanup_timeout,
         )
         # An overridden pytest selection must not silently turn this into a smoke-only pass.
-        lifecycle_path = results / "lifecycle.json"
-        lifecycle = json.loads(lifecycle_path.read_text()) if lifecycle_path.is_file() else {}
-        if not all(
-            lifecycle.get(key)
-            for key in ("succeeded", "queue_admitted", "gpu_cleanup", "snapshot_logs", "sse")
-        ) or not isinstance(lifecycle.get("artifacts"), dict):
-            raise RuntimeError("Required queued training/log/artifact/cleanup evidence is missing")
+        from tests.e2e.algorithms import ALGORITHMS
+
+        names = ALGORITHMS if args.algorithm_matrix else (None,)
+        for name in names:
+            filename = f"lifecycle-{name}.json" if name else "lifecycle.json"
+            lifecycle_path = results / filename
+            lifecycle = json.loads(lifecycle_path.read_text()) if lifecycle_path.is_file() else {}
+            required = ("succeeded", "queue_admitted", "gpu_cleanup", "snapshot_logs")
+            if not args.algorithm_matrix:
+                required += ("sse",)
+            if not all(lifecycle.get(key) for key in required) or not isinstance(
+                lifecycle.get("artifacts"), dict
+            ):
+                label = name or "lora_sft"
+                raise RuntimeError(
+                    f"Required {label} queued training/log/artifact/cleanup evidence is missing"
+                )
         evidence["outcome"] = "passed"
     except BaseException:
         evidence["outcome"] = "failed"

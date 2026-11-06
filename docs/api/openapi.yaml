@@ -140,6 +140,8 @@ paths:
         A successful response acknowledges RayJob creation, not that the Ray
         job has started or completed. The returned id is the RayJob name and can
         be used with the detail and log endpoints in the same project.
+        Backend-specific resource and storage constraints are validated at
+        submission; unsupported combinations return 422.
       operationId: createTrainingJob
       x-submission-context: true
       x-project-authorization:
@@ -170,17 +172,12 @@ paths:
                     uri: hf://hf-secret-token/tatsu-lab/alpaca
                   algorithm:
                     name: lora_sft
-                    parameters:
-                      learning_rate: 0.00002
-                      num_epochs: 3
-                      effective_batch_size: 8
-                      max_seq_len: 2048
                   resources:
-                    num_nodes: 2
-                    gpus_per_node: 4
+                    num_nodes: 1
+                    gpus_per_node: 1
                     gpu_type: nvidia.com/gpu
-                    cpus_per_node: "16"
-                    memory_per_node: "64Gi"
+                    cpus_per_node: "4"
+                    memory_per_node: "16Gi"
                   output:
                     destination_uri: s3://checkpoint-storage/my-ml-bucket/checkpoints/llama3-lora/
               s3_inputs:
@@ -195,17 +192,12 @@ paths:
                     uri: s3://training-data/my-ml-bucket/datasets/alpaca/train.jsonl
                   algorithm:
                     name: lora_sft
-                    parameters:
-                      learning_rate: 0.00002
-                      num_epochs: 3
-                      effective_batch_size: 8
-                      max_seq_len: 2048
                   resources:
-                    num_nodes: 2
-                    gpus_per_node: 4
+                    num_nodes: 1
+                    gpus_per_node: 1
                     gpu_type: nvidia.com/gpu
-                    cpus_per_node: "16"
-                    memory_per_node: "64Gi"
+                    cpus_per_node: "4"
+                    memory_per_node: "16Gi"
                   output:
                     destination_uri: s3://checkpoint-storage/my-ml-bucket/checkpoints/s3-training/
               pvc_inputs_output:
@@ -220,19 +212,33 @@ paths:
                     uri: pvc://training-data/datasets/alpaca/train.jsonl
                   algorithm:
                     name: lora_sft
-                    parameters:
-                      learning_rate: 0.00002
-                      num_epochs: 3
-                      effective_batch_size: 8
-                      max_seq_len: 2048
+                  resources:
+                    num_nodes: 1
+                    gpus_per_node: 1
+                    gpu_type: nvidia.com/gpu
+                    cpus_per_node: "4"
+                    memory_per_node: "16Gi"
+                  output:
+                    destination_uri: pvc://training-output/checkpoints/pvc-training/
+              grpo_hf_inputs_pvc_output:
+                summary: Experimental LoRA GRPO; requires a compatible verl/TRL runtime
+                value:
+                  name: grpo-toucan
+                  backend: ray
+                  model:
+                    uri: hf://hf-secret-token/Qwen/Qwen3-4B
+                  dataset:
+                    uri: hf://hf-secret-token/Agent-Ark/Toucan-1.5M
+                  algorithm:
+                    name: lora_grpo
                   resources:
                     num_nodes: 2
                     gpus_per_node: 4
                     gpu_type: nvidia.com/gpu
-                    cpus_per_node: "16"
-                    memory_per_node: "64Gi"
+                    cpus_per_node: "8"
+                    memory_per_node: "192Gi"
                   output:
-                    destination_uri: pvc://training-output/checkpoints/pvc-training/
+                    destination_uri: pvc://training-output/checkpoints/grpo-toucan/
       responses:
         '202':
           description: RayJob created; training execution proceeds asynchronously
@@ -490,11 +496,6 @@ paths:
                         uri: hf://hf-secret-token/tatsu-lab/alpaca
                       algorithm:
                         name: lora_sft
-                        parameters:
-                          learning_rate: 0.00002
-                          num_epochs: 3
-                          effective_batch_size: 8
-                          max_seq_len: 2048
                       resources:
                         num_nodes: 2
                         gpus_per_node: 4
@@ -540,9 +541,6 @@ paths:
                         uri: hf://hf-secret-token/tatsu-lab/alpaca
                       algorithm:
                         name: lora_sft
-                        parameters:
-                          learning_rate: 0.00002
-                          num_epochs: 3
                     progress:
                       percentage: 100
                       current_epoch: 3
@@ -1026,11 +1024,23 @@ components:
     DatasetSpec:
       type: object
       additionalProperties: false
-      description: Dataset input selected by its project-scoped storage URI.
+      description: >
+        Dataset input selected by its project-scoped storage URI. Optional
+        config and split apply only to Hugging Face datasets loaded locally
+        for SFT, OSFT, and LoRA SFT. LoRA GRPO uses Training Hub's remote
+        dataset loader and its algorithm-level data_config parameter instead.
       required: [uri]
       properties:
         uri:
           $ref: '#/components/schemas/TrainingInputURI'
+        config:
+          type: string
+          minLength: 1
+          description: Optional Hugging Face dataset configuration name, such as All.
+        split:
+          type: string
+          minLength: 1
+          description: Optional Hugging Face split name; defaults to train.
       example:
         uri: hf://hf-secret-token/tatsu-lab/alpaca
 
@@ -1043,34 +1053,26 @@ components:
         name:
           type: string
           description: >
-            Algorithm identifier exposed by GET /algorithms for the configured
-            Ray Universal Image and release. Use that catalog and its parameter schema.
+            Training algorithm identifier. Support depends on the selected
+            backend and runtime and is validated at submission.
           example: lora_sft
         parameters:
           type: object
           additionalProperties: true
           description: >
-            Optional hyperparameter overrides validated against the selected
-            algorithm's Training Hub parameter schema. Basic lora_sft overrides
-            include learning_rate, num_epochs, effective_batch_size (total
-            samples per optimizer update across GPUs and gradient accumulation),
-            and max_seq_len (maximum tokens per training sample). These are
-            optional overrides; example values are not API defaults. Omitted
-            parameters use the configured backend's defaults.
-          example:
-            learning_rate: 0.00002
-            num_epochs: 3
-            effective_batch_size: 8
-            max_seq_len: 2048
+            Backend-specific training overrides. Accepted keys and constraints
+            are validated by the service rather than enumerated in this API
+            contract. Omitted overrides use backend defaults. Worker and GPU
+            topology belongs in resources, not algorithm parameters.
 
     ResourceSpec:
       type: object
       additionalProperties: false
       description: >
-        The only public source for worker and GPU topology. If omitted, platform
-        defaults are applied. Algorithm parameters describe hyperparameters,
-        not worker topology. For multi-node requests, every referenced PVC must
-        support ReadWriteMany access because Ray head and worker pods mount it.
+        The public source for worker and GPU topology. num_nodes includes the
+        Ray head. Head and worker placement depends on the selected backend;
+        unsupported combinations return 422. Multi-node requests require
+        ReadWriteMany access for every referenced PVC shared by Ray pods.
       properties:
         num_nodes:
           type: integer
@@ -1087,12 +1089,12 @@ components:
           example: nvidia.com/gpu
         cpus_per_node:
           type: string
-          default: "8"
-          example: "16"
+          default: "4"
+          example: "4"
         memory_per_node:
           type: string
-          default: "32Gi"
-          example: "64Gi"
+          default: "16Gi"
+          example: "16Gi"
 
     OutputSpec:
       type: object
