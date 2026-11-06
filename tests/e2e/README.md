@@ -91,9 +91,11 @@ the repository** and edit it for the target project. The named S3 connections
 must be project-local Secrets containing `AWS_S3_ENDPOINT`, `AWS_ACCESS_KEY_ID`
 and `AWS_SECRET_ACCESS_KEY` (optional `AWS_DEFAULT_REGION`/`AWS_SESSION_TOKEN`).
 The HF Secret needs `HF_TOKEN` or `token`, even for public repositories. Stage a
-small model snapshot in the S3 model prefix and a small Alpaca JSONL file at the
-S3 dataset key. Set the HF dataset repository to a small `train` split with the
-same `instruction`/`output` columns. The two models/datasets need to be
+small model snapshot in the S3 model prefix and a small chat JSONL file (one
+`messages` list of `user`/`assistant` turns per line) at the S3 dataset key. Set
+the HF dataset to a small `train` split with the same `messages` column. Alpaca
+data fails: `lora_sft` trains with `assistant_only_loss`, which needs chat
+turns. The two models/datasets need to be
 compatible with the fixture's LoRA parameters and runtime. The example names
 and repositories are illustrative, **not pre-provisioned fixtures**. The API
 caller must be authorized to read the named Secrets and create RayJobs.

@@ -120,12 +120,15 @@ def lifecycle(api, training_job, pytestconfig, observer, executor):
     assert detail.get("selected_backend") == payload.get("backend", "ray")
     if "queue_name" in payload:
         assert detail.get("queue_name") == payload["queue_name"]
-    if "resources" in payload:
+    # A GPU-free GRPO head makes node groups heterogeneous; the service omits resources.
+    if "resources" in payload and payload["algorithm"]["name"] != "lora_grpo":
         assert detail.get("resources")
         for key, value in payload["resources"].items():
             assert detail["resources"].get(key) == value, (
                 "Observed resources differ from submission"
             )
+    elif "resources" in payload:
+        assert "resources" not in detail
 
     duplicate = api.request("POST", api.jobs, expected=409, json=payload)
     api.error(

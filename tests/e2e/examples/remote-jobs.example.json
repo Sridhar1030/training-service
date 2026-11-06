@@ -4,9 +4,8 @@
     "algorithm": {
       "name": "lora_sft",
       "parameters": {
-        "dataset_type": "alpaca",
-        "field_instruction": "instruction",
-        "field_output": "output",
+        "dataset_type": "chat_template",
+        "field_messages": "messages",
         "num_epochs": 1,
         "effective_batch_size": 1,
         "max_seq_len": 128,
@@ -28,7 +27,11 @@
     "hf": {"uri": "hf://hf-token/Qwen/Qwen2.5-0.5B-Instruct"}
   },
   "datasets": {
-    "s3": {"uri": "s3://input-connection/my-test-bucket/datasets/tiny-alpaca.jsonl"},
-    "hf": {"uri": "hf://hf-token/my-org/tiny-alpaca", "split": "train"}
+    "s3": {"uri": "s3://input-connection/my-test-bucket/datasets/tiny-chat.jsonl"},
+    "hf": {
+      "uri": "hf://hf-token/trl-internal-testing/zen",
+      "config": "conversational_language_modeling",
+      "split": "train"
+    }
   }
 }

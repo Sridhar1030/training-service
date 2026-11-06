@@ -95,7 +95,7 @@ An opt-in S3 upload check at `tests/integration/test_s3_output.py` writes a
 checkpoint object, reads it back, and deletes it. Set `TRAINING_S3_E2E_ENDPOINT`,
 `TRAINING_S3_E2E_BUCKET`, `TRAINING_S3_E2E_ACCESS_KEY`, and
 `TRAINING_S3_E2E_SECRET_KEY`, then run
-`pytest tests/integration/test_s3_output.py`. It requires `boto3` locally.
+`uv run --with 'boto3==1.40.61' pytest tests/integration/test_s3_output.py`.
 
 See [job operations](docs/job-operations.md) for permissions, log gateway
 configuration, response examples, and cascading cleanup behavior.
