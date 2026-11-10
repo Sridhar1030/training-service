@@ -1,5 +1,6 @@
 """Credential-free runner/observer safety tests, not substitutes for live E2E."""
 
+import asyncio
 import json
 import os
 import signal
@@ -1511,7 +1512,15 @@ def test_stream_checks_distinct_sse_events_and_rejects_error_events(body, passes
         headers={"Authorization": "Bearer unit-token"},
         transport=httpx.MockTransport(transport),
     ) as http:
-        api = LiveAPI(http, "test-project")
+        api = LiveAPI(
+            http,
+            "test-project",
+            async_client=lambda: httpx.AsyncClient(
+                base_url=http.base_url,
+                headers=http.headers,
+                transport=httpx.MockTransport(transport),
+            ),
+        )
         if passes:
             assert follow_logs(api, "/jobs/e2e-owned", 1) == 2
         else:
@@ -1519,37 +1528,67 @@ def test_stream_checks_distinct_sse_events_and_rejects_error_events(body, passes
                 follow_logs(api, "/jobs/e2e-owned", 1)
 
 
-@pytest.mark.parametrize("quiet", [False, True])
-def test_expiry_verification_is_bounded_when_server_ignores_timeout(monkeypatch, quiet):
-    now = stream_clock(monkeypatch)
+@pytest.mark.parametrize("mode", ["headers", "quiet", "chatty", "read_timeout"])
+def test_expiry_verification_is_bounded_when_server_ignores_timeout(monkeypatch, mode):
+    monkeypatch.setattr(training_jobs, "TIMEOUT_VERIFICATION_SECONDS", 0.05)
     closed = []
+    cancelled = []
+    clients = []
+    requests = []
 
-    class NeverExpiring(httpx.SyncByteStream):
-        def __iter__(self):
-            if quiet:
-                raise httpx.ReadTimeout("Quiet server ignored timeout")
-            while True:
-                now[0] += 1
-                yield b'event: log\ndata: {"message":"still running"}\n\n'
+    class NeverExpiring(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            try:
+                if mode == "read_timeout":
+                    raise httpx.ReadTimeout("Quiet server ignored timeout")
+                while True:
+                    await asyncio.sleep(0.005 if mode == "chatty" else 60)
+                    yield b'event: log\ndata: {"message":"still running"}\n\n'
+            finally:
+                cancelled.append(True)
 
-        def close(self):
+        async def aclose(self):
             closed.append(True)
 
-    def transport(request):
+    async def transport(request):
+        requests.append(request)
         assert request.extensions["timeout"]["read"] == 2
+        if mode == "headers":
+            try:
+                await asyncio.sleep(60)
+            finally:
+                cancelled.append(True)
         return httpx.Response(
             200, headers={"Content-Type": "text/event-stream"}, stream=NeverExpiring()
         )
 
+    def async_client():
+        client = httpx.AsyncClient(
+            base_url="https://unit.invalid", transport=httpx.MockTransport(transport)
+        )
+        clients.append(client)
+        return client
+
     with httpx.Client(
-        base_url="https://unit.invalid", transport=httpx.MockTransport(transport)
+        base_url="https://unit.invalid",
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                content='event: error\ndata: {"code":"stream_expired"}\n\n',
+            )
+        ),
     ) as http:
+        api = LiveAPI(http, "test-project", async_client=async_client)
         with pytest.raises(
             pytest.fail.Exception, match="Timeout verification exceeded its client deadline"
         ):
-            training_jobs.verify_stream_timeout(LiveAPI(http, "test-project"), "/jobs/e2e-owned")
-    assert closed == [True]
-    assert now[0] <= 10
+            training_jobs.verify_stream_timeout(api, "/jobs/e2e-owned")
+        assert not http.is_closed
+    assert len(requests) == 1
+    assert cancelled == [True]
+    assert closed == ([] if mode == "headers" else [True])
+    assert len(clients) == 1 and clients[0].is_closed
 
 
 def stream_clock(monkeypatch):
@@ -1598,7 +1637,16 @@ def test_stream_reconnects_after_quiet_read_and_preserves_incremental_events(mon
         headers={"Authorization": "Bearer unit-token"},
         transport=httpx.MockTransport(transport),
     ) as http:
-        assert follow_logs(LiveAPI(http, "test-project"), "/jobs/e2e-owned", 60) == 2
+        api = LiveAPI(
+            http,
+            "test-project",
+            async_client=lambda: httpx.AsyncClient(
+                base_url=http.base_url,
+                headers=http.headers,
+                transport=httpx.MockTransport(transport),
+            ),
+        )
+        assert follow_logs(api, "/jobs/e2e-owned", 60) == 2
     assert len(calls) == 4
     assert calls[2].url.params["timeout_seconds"] == "1"
     assert not calls[3].url.params

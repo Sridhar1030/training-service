@@ -175,7 +175,8 @@ def _project(value):
 class LiveAPI:
     """HTTP-only test client; failure messages never dump headers or response bodies."""
 
-    def __init__(self, client, project):
+    def __init__(self, client, project, *, async_client=None):
+        self.async_client = async_client
         self.client = client
         self.project = project
         self.jobs = f"/api/v1/projects/{project}/training-jobs"
@@ -307,15 +308,16 @@ def api(pytestconfig):
         tls = ssl.create_default_context(cafile=ca_bundle)
     except (OSError, ssl.SSLError):
         raise pytest.UsageError("Cannot load TRAINING_SERVICE_CA_BUNDLE") from None
-    with httpx.Client(
-        base_url=origin,
-        headers={"Authorization": "Bearer " + os.environ["TRAINING_SERVICE_TOKEN"].strip()},
-        verify=tls,
-        timeout=httpx.Timeout(pytestconfig.getoption("request_timeout"), connect=5),
-        follow_redirects=False,
-        trust_env=False,
-    ) as client:
-        yield LiveAPI(client, project)
+    client_options = {
+        "base_url": origin,
+        "headers": {"Authorization": "Bearer " + os.environ["TRAINING_SERVICE_TOKEN"].strip()},
+        "verify": tls,
+        "timeout": httpx.Timeout(pytestconfig.getoption("request_timeout"), connect=5),
+        "follow_redirects": False,
+        "trust_env": False,
+    }
+    with httpx.Client(**client_options) as client:
+        yield LiveAPI(client, project, async_client=lambda: httpx.AsyncClient(**client_options))
 
 
 @pytest.fixture

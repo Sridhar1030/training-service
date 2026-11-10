@@ -1,5 +1,6 @@
 """One isolated, real training run from submission through terminal deletion."""
 
+import asyncio
 import hashlib
 import json
 import os
@@ -14,6 +15,7 @@ import pytest
 from tests.e2e.algorithms import ALGORITHMS
 
 TERMINAL = {"SUCCEEDED", "FAILED", "STOPPED"}
+TIMEOUT_VERIFICATION_SECONDS = 10
 
 
 def follow_logs(api, path, timeout):
@@ -67,23 +69,25 @@ def follow_logs(api, path, timeout):
 
 
 def verify_stream_timeout(api, path):
-    """Bound quiet reads and a chatty server that ignores the requested lifetime."""
-    deadline = time.monotonic() + 10
-    body = []
+    """Cancel the entire verification request, including header waits and busy streams."""
+
+    async def verify():
+        body = []
+        async with asyncio.timeout(TIMEOUT_VERIFICATION_SECONDS), api.async_client() as client:
+            async with client.stream(
+                "GET", path + "/logs", params={"follow": "true", "timeout_seconds": 1}, timeout=2
+            ) as response:
+                assert response.status_code == 200
+                assert response.headers.get("content-type", "").startswith("text/event-stream")
+                async for chunk in response.aiter_text():
+                    body.append(chunk)
+        return "".join(body)
+
     try:
-        with api.client.stream(
-            "GET", path + "/logs", params={"follow": "true", "timeout_seconds": 1}, timeout=2
-        ) as response:
-            assert response.status_code == 200
-            assert response.headers.get("content-type", "").startswith("text/event-stream")
-            for chunk in response.iter_text():
-                if time.monotonic() >= deadline:
-                    pytest.fail("Timeout verification exceeded its client deadline", pytrace=False)
-                body.append(chunk)
-    except httpx.TimeoutException:
+        body = asyncio.run(verify())
+    except (TimeoutError, httpx.TimeoutException):
         pytest.fail("Timeout verification exceeded its client deadline", pytrace=False)
-    assert time.monotonic() < deadline, "Per-request log timeout was not honored"
-    assert '"code":"stream_expired"' in "".join(body)
+    assert '"code":"stream_expired"' in body
     assert api.request("GET", path + "/logs").status_code == 200
 
 
