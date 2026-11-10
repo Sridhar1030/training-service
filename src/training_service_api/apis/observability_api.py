@@ -136,11 +136,16 @@ async def stream_job_logs(
     timeout_seconds: int | None = Query(
         None,
         description=(
-            "Total lifetime of this follow connection in seconds (1 to "
-            "2147483647). The upper bound keeps deadline arithmetic representable. "
-            "When omitted, uses the service configuration (300 seconds by "
-            "default). Ignored when follow&#x3D;false. Expiry closes the stream "
-            "with a stream_expired event; reconnect to continue reading logs. "
+            "Requested total lifetime of this follow connection in seconds (1 to "
+            "2147483647), written with ASCII digits and no signs, leading zeros, "
+            "whitespace, or decimal point. The numeric upper bound keeps deadline "
+            "arithmetic representable. The effective lifetime is the smaller of "
+            "this value and TRAINING_SERVICE_LOG_STREAM_TIMEOUT_SECONDS (300 "
+            "seconds by default); omission uses that configured maximum. Validated "
+            "for every request: invalid values return 400 even when "
+            "follow&#x3D;false; valid values have no effect on snapshots. Expiry "
+            "closes the stream with a stream_expired event; reconnect to continue "
+            "reading logs. "
         ),
         alias="timeout_seconds",
         ge=1,

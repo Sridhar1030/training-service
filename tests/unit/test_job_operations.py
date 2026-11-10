@@ -381,7 +381,10 @@ def test_log_snapshot_uses_scoped_gateway_and_caller_token(backend):
         ("7200", None, 7200),
         (None, 2, 2),
         ("7200", 1, 1),
-        (None, 2147483647, 2147483647),
+        (None, 2147483647, 300),
+        ("1", 2, 1),
+        ("7200", 7201, 7200),
+        ("7200", 7200, 7200),
     ],
 )
 def test_follow_uses_sse_and_closes_sdk_iterator(
@@ -639,16 +642,35 @@ def test_sdk_environment_override_is_rejected_before_credentials_are_sent(backen
     factory.assert_not_called()
 
 
+@pytest.mark.parametrize("follow", ["false", "true"])
 @pytest.mark.parametrize(
     "query",
-    ["tail_lines=0", "follow=invalid"]
+    [{"tail_lines": "0"}, {"follow": "invalid"}]
     + [
-        f"timeout_seconds={value}"
-        for value in ("0", "-1", "invalid", "1.5", "", "2147483648", "9" * 400)
+        {"timeout_seconds": value}
+        for value in (
+            "0",
+            "-1",
+            "invalid",
+            "1.5",
+            "1.0",
+            "+5",
+            "05",
+            " 5",
+            "٥",
+            "",
+            "2147483648",
+            "9" * 400,
+        )
     ],
 )
-def test_invalid_log_queries_return_contract_400(backend, query):
-    assert backend[0].get(BASE + "/example/logs?" + query, headers=HEADERS).status_code == 400
+def test_invalid_log_queries_return_contract_400(backend, query, follow):
+    response = backend[0].get(
+        BASE + "/example/logs", params={"follow": follow, **query}, headers=HEADERS
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "bad_request"
+    backend[7].assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -719,8 +741,13 @@ def test_handlers_use_injected_backend_without_ray_resource_assumptions():
     )
 
 
-def test_request_timeout_expires_real_stream_without_stopping_job(backend):
-    http, _, _, sdk, *_ = backend
+@pytest.mark.parametrize("configured,requested", [("300", 1), ("1", 2147483647)])
+def test_request_timeout_expires_real_stream_without_stopping_job(
+    backend, monkeypatch, configured, requested
+):
+    _, _, _, sdk, _, _, authorizer, factory = backend
+    monkeypatch.setenv("TRAINING_SERVICE_LOG_STREAM_TIMEOUT_SECONDS", configured)
+    http = TestClient(create_app(Authenticator(), authorizer))
     closed = []
 
     async def chunks(submission_id):
@@ -732,13 +759,25 @@ def test_request_timeout_expires_real_stream_without_stopping_job(backend):
 
     sdk.tail_job_logs = chunks
     response = http.get(
-        BASE + "/example/logs", params={"follow": "true", "timeout_seconds": 1}, headers=HEADERS
+        BASE + "/example/logs",
+        params={"follow": "true", "timeout_seconds": requested},
+        headers=HEADERS,
     )
     assert response.status_code == 200
     assert '"code":"stream_expired"' in response.text
     assert closed == [True]
     sdk.stop_job.assert_not_called()
-    snapshot = http.get(BASE + "/example/logs", params={"timeout_seconds": 1}, headers=HEADERS)
+    snapshot = http.get(
+        BASE + "/example/logs", params={"timeout_seconds": requested}, headers=HEADERS
+    )
     assert snapshot.status_code == 200
     assert snapshot.text == "first\nsecond\nthird\n"
-    assert http.app.state.log_stream_timeout_seconds == 300
+    assert http.app.state.log_stream_timeout_seconds == int(configured)
+    authorizer.allowed = False
+    denied = http.get(
+        BASE + "/example/logs",
+        params={"follow": "true", "timeout_seconds": requested},
+        headers=HEADERS,
+    )
+    assert denied.status_code == 403
+    assert factory.call_count == 2  # Denied reconnection never reaches the log backend.

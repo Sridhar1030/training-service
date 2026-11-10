@@ -187,16 +187,19 @@ async def driver_logs(
             raise logs_not_found(project, name) from None
         raise
 
+    configured_timeout = request.app.state.log_stream_timeout_seconds
+    stream_timeout = (
+        min(timeout_seconds, configured_timeout)
+        if timeout_seconds is not None
+        else configured_timeout
+    )
+
     async def events() -> AsyncIterator[str]:
         try:
             # Bound credential lifetime on a stream; reconnect reauthenticates.
             stream = cast(AsyncGenerator[str, None], sdk.tail_job_logs(submission_id))
             async with (
-                asyncio.timeout(
-                    timeout_seconds
-                    if timeout_seconds is not None
-                    else request.app.state.log_stream_timeout_seconds
-                ),
+                asyncio.timeout(stream_timeout),
                 aclosing(stream) as chunks,
             ):
                 async for chunk in chunks:
