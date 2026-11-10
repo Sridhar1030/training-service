@@ -42,6 +42,11 @@ def pytest_addoption(parser):
         "--check-stream", action="store_true", help="Require incremental SSE driver logs."
     )
     group.addoption("--stream-timeout", type=int, default=60)
+    group.addoption(
+        "--log-stream-max-seconds",
+        type=int,
+        help="Expected deployed log-stream limit; also verify default lifetime and server cap.",
+    )
     group.addoption("--queue-profile", choices=PROFILES)
     group.addoption(
         "--observe-cluster",
@@ -84,6 +89,12 @@ def pytest_configure(config):
     for option in ("job_timeout", "cleanup_timeout", "request_timeout", "stream_timeout"):
         if config.getoption(option) <= 0:
             raise pytest.UsageError(f"--{option.replace('_', '-')} must be positive")
+    log_limit = config.getoption("log_stream_max_seconds")
+    if log_limit is not None:
+        if not 1 <= log_limit < 2147483647:
+            raise pytest.UsageError("--log-stream-max-seconds must be between 1 and 2147483646")
+        if not config.getoption("check_stream"):
+            raise pytest.UsageError("--log-stream-max-seconds requires --check-stream")
     for option in (
         "check_logs",
         "check_stream",
@@ -175,8 +186,10 @@ def _project(value):
 class LiveAPI:
     """HTTP-only test client; failure messages never dump headers or response bodies."""
 
-    def __init__(self, client, project, *, async_client=None):
+    def __init__(self, client, project, *, async_client=None, log_stream_max_seconds=None):
         self.async_client = async_client
+        self.log_stream_max_seconds = log_stream_max_seconds
+        self.log_timeout_checks = {}
         self.client = client
         self.project = project
         self.jobs = f"/api/v1/projects/{project}/training-jobs"
@@ -317,7 +330,12 @@ def api(pytestconfig):
         "trust_env": False,
     }
     with httpx.Client(**client_options) as client:
-        yield LiveAPI(client, project, async_client=lambda: httpx.AsyncClient(**client_options))
+        yield LiveAPI(
+            client,
+            project,
+            async_client=lambda: httpx.AsyncClient(**client_options),
+            log_stream_max_seconds=pytestconfig.getoption("log_stream_max_seconds"),
+        )
 
 
 @pytest.fixture

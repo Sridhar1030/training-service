@@ -1496,7 +1496,10 @@ def test_cleanup_never_deletes_foreign_or_active_workloads(kind):
         ('event: error\ndata: {"code":"logs_unavailable","message":"failed"}\n\n', False),
     ],
 )
-def test_stream_checks_distinct_sse_events_and_rejects_error_events(body, passes):
+def test_stream_checks_distinct_sse_events_and_rejects_error_events(monkeypatch, body, passes):
+    verification = Mock()
+    monkeypatch.setattr(training_jobs, "verify_stream_timeout", verification)
+
     def transport(request):
         response_body = (
             'event: error\ndata: {"code":"stream_expired","message":"Reconnect to continue."}\n\n'
@@ -1512,17 +1515,10 @@ def test_stream_checks_distinct_sse_events_and_rejects_error_events(body, passes
         headers={"Authorization": "Bearer unit-token"},
         transport=httpx.MockTransport(transport),
     ) as http:
-        api = LiveAPI(
-            http,
-            "test-project",
-            async_client=lambda: httpx.AsyncClient(
-                base_url=http.base_url,
-                headers=http.headers,
-                transport=httpx.MockTransport(transport),
-            ),
-        )
+        api = LiveAPI(http, "test-project")
         if passes:
             assert follow_logs(api, "/jobs/e2e-owned", 1) == 2
+            verification.assert_called_once_with(api, "/jobs/e2e-owned")
         else:
             with pytest.raises((pytest.fail.Exception, AssertionError)):
                 follow_logs(api, "/jobs/e2e-owned", 1)
@@ -1530,7 +1526,11 @@ def test_stream_checks_distinct_sse_events_and_rejects_error_events(body, passes
 
 @pytest.mark.parametrize("mode", ["headers", "quiet", "chatty", "read_timeout"])
 def test_expiry_verification_is_bounded_when_server_ignores_timeout(monkeypatch, mode):
-    monkeypatch.setattr(training_jobs, "TIMEOUT_VERIFICATION_SECONDS", 0.05)
+    monkeypatch.setattr(
+        training_jobs,
+        "asyncio",
+        SimpleNamespace(run=asyncio.run, timeout=lambda seconds: asyncio.timeout(0.05)),
+    )
     closed = []
     cancelled = []
     clients = []
@@ -1552,7 +1552,7 @@ def test_expiry_verification_is_bounded_when_server_ignores_timeout(monkeypatch,
 
     async def transport(request):
         requests.append(request)
-        assert request.extensions["timeout"]["read"] == 2
+        assert request.extensions["timeout"]["read"] == 10
         if mode == "headers":
             try:
                 await asyncio.sleep(60)
@@ -1572,11 +1572,7 @@ def test_expiry_verification_is_bounded_when_server_ignores_timeout(monkeypatch,
     with httpx.Client(
         base_url="https://unit.invalid",
         transport=httpx.MockTransport(
-            lambda request: httpx.Response(
-                200,
-                headers={"Content-Type": "text/event-stream"},
-                content='event: error\ndata: {"code":"stream_expired"}\n\n',
-            )
+            lambda request: httpx.Response(200, json={"status": "RUNNING"})
         ),
     ) as http:
         api = LiveAPI(http, "test-project", async_client=async_client)
@@ -1606,6 +1602,8 @@ def stream_clock(monkeypatch):
 
 def test_stream_reconnects_after_quiet_read_and_preserves_incremental_events(monkeypatch):
     now = stream_clock(monkeypatch)
+    verification = Mock()
+    monkeypatch.setattr(training_jobs, "verify_stream_timeout", verification)
     calls = []
 
     class QuietStream(httpx.SyncByteStream):
@@ -1637,19 +1635,10 @@ def test_stream_reconnects_after_quiet_read_and_preserves_incremental_events(mon
         headers={"Authorization": "Bearer unit-token"},
         transport=httpx.MockTransport(transport),
     ) as http:
-        api = LiveAPI(
-            http,
-            "test-project",
-            async_client=lambda: httpx.AsyncClient(
-                base_url=http.base_url,
-                headers=http.headers,
-                transport=httpx.MockTransport(transport),
-            ),
-        )
+        api = LiveAPI(http, "test-project")
         assert follow_logs(api, "/jobs/e2e-owned", 60) == 2
-    assert len(calls) == 4
-    assert calls[2].url.params["timeout_seconds"] == "1"
-    assert not calls[3].url.params
+        verification.assert_called_once_with(api, "/jobs/e2e-owned")
+    assert len(calls) == 2
 
 
 def test_stream_quiet_reads_exhaust_only_the_overall_deadline(monkeypatch):
@@ -1748,7 +1737,9 @@ def test_existing_deployment_config_resolves_default_api_token(monkeypatch):
     config = Mock()
     config.option.collectonly = False
     config.getoption.side_effect = lambda option: (
-        30
+        None
+        if option == "log_stream_max_seconds"
+        else 30
         if option in {"job_timeout", "cleanup_timeout", "request_timeout", "stream_timeout"}
         else False
     )
