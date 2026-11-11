@@ -26,7 +26,7 @@ class InfrastructureDiscoveryApi(BaseInfrastructureDiscoveryApi):
     ) -> QueueInfoResponse:
         del token_OpenShiftBearer
         discoverer: QueueDiscoverer = request.app.state.queue_discoverer
-        return await discoverer.list_queues(project)
+        return await discoverer.list_queues(request, project)
 
     async def get_algorithm(
         self, name: str, include: str | None, token_OpenShiftBearer: TokenModel, request: Request
