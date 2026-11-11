@@ -642,6 +642,7 @@ paths:
         List LocalQueues in the specified project. Kueue must be enabled in RHOAI. This endpoint
         is not yet implemented and currently returns 501.
       operationId: listQueues
+      x-request-context: true
       x-project-authorization:
         group: kueue.x-k8s.io
         resource: localqueues
