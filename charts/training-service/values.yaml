@@ -38,11 +38,6 @@ authentication:
   tokenReview:
     enabled: true
 
-# The service checks the caller's LocalQueue permission before it uses this
-# narrowly scoped service-account read to retrieve the API response.
-queueDiscovery:
-  enabled: true
-
 # Additional settings, such as the Ray gateway URL and trusted CA path.
 # Use trainingRuntime.image instead of setting TRAINING_RAY_IMAGE here.
 env: []

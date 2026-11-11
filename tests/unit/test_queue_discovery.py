@@ -1,11 +1,13 @@
 """Kueue LocalQueue discovery tests with mocked Kubernetes boundaries."""
 
+from contextlib import contextmanager
 from unittest.mock import Mock
 
 import pytest
 from fastapi.testclient import TestClient
 from kubernetes.client.exceptions import ApiException
 
+from training_service import queue_discovery
 from training_service.auth import CallerIdentity
 from training_service.authorization import ProjectPermission
 from training_service.main import create_app
@@ -38,23 +40,36 @@ class FakeDiscoverer:
         self.result = result
         self.projects: list[str] = []
 
-    async def list_queues(self, project: str) -> QueueInfoResponse:
+    async def list_queues(self, request: object, project: str) -> QueueInfoResponse:
         self.projects.append(project)
         return self.result
 
 
-def test_kubernetes_queue_discovery_maps_local_queue_metadata() -> None:
+def mocked_kubernetes_clients(monkeypatch: pytest.MonkeyPatch, core: Mock, custom: Mock) -> None:
+    @contextmanager
+    def caller(_: object):
+        yield Mock()
+
+    monkeypatch.setattr(queue_discovery, "caller_client", caller)
+    monkeypatch.setattr(queue_discovery.client, "CoreV1Api", lambda _: core)
+    monkeypatch.setattr(queue_discovery.client, "CustomObjectsApi", lambda _: custom)
+
+
+def test_kubernetes_queue_discovery_maps_local_queue_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     discoverer = KubernetesQueueDiscoverer()
-    api = Mock()
-    api.list_namespaced_custom_object.return_value = {
+    core = Mock()
+    custom = Mock()
+    custom.list_namespaced_custom_object.return_value = {
         "items": [
             {"metadata": {"name": "team-alpha"}, "spec": {"clusterQueue": "gpu"}},
             {"metadata": {"name": "unassigned"}, "spec": {}},
         ]
     }
-    discoverer._api = api
+    mocked_kubernetes_clients(monkeypatch, core, custom)
 
-    result = discoverer._list_queues("team-alpha")
+    result = discoverer._list_queues(Mock(), "team-alpha")
 
     assert result.model_dump(exclude_unset=True) == {
         "kueue_enabled": True,
@@ -63,7 +78,8 @@ def test_kubernetes_queue_discovery_maps_local_queue_metadata() -> None:
             {"name": "unassigned"},
         ],
     }
-    assert api.list_namespaced_custom_object.call_args.kwargs == {
+    core.read_namespace.assert_called_once_with("team-alpha", _request_timeout=(5, 15))
+    assert custom.list_namespaced_custom_object.call_args.kwargs == {
         "group": "kueue.x-k8s.io",
         "version": "v1beta2",
         "namespace": "team-alpha",
@@ -72,29 +88,36 @@ def test_kubernetes_queue_discovery_maps_local_queue_metadata() -> None:
     }
 
 
-def test_kubernetes_queue_discovery_handles_empty_and_missing_kueue() -> None:
+def test_kubernetes_queue_discovery_handles_empty_and_missing_kueue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     discoverer = KubernetesQueueDiscoverer()
-    api = Mock()
-    api.list_namespaced_custom_object.return_value = {"items": []}
-    discoverer._api = api
-    assert discoverer._list_queues("team-alpha") == QueueInfoResponse(kueue_enabled=True, queues=[])
+    core = Mock()
+    custom = Mock()
+    custom.list_namespaced_custom_object.return_value = {"items": []}
+    mocked_kubernetes_clients(monkeypatch, core, custom)
+    assert discoverer._list_queues(Mock(), "team-alpha") == QueueInfoResponse(
+        kueue_enabled=True, queues=[]
+    )
 
-    api.list_namespaced_custom_object.side_effect = ApiException(status=404)
-    assert discoverer._list_queues("team-alpha") == QueueInfoResponse(
+    custom.list_namespaced_custom_object.side_effect = ApiException(status=404)
+    assert discoverer._list_queues(Mock(), "team-alpha") == QueueInfoResponse(
         kueue_enabled=False, queues=[]
     )
 
 
 @pytest.mark.anyio
-async def test_kubernetes_queue_discovery_maps_kubernetes_failure_to_api_error() -> None:
+async def test_kubernetes_queue_discovery_maps_kubernetes_failure_to_api_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     discoverer = KubernetesQueueDiscoverer()
-
-    api = Mock()
-    api.list_namespaced_custom_object.side_effect = ApiException(status=500)
-    discoverer._api = api
+    core = Mock()
+    custom = Mock()
+    custom.list_namespaced_custom_object.side_effect = ApiException(status=500)
+    mocked_kubernetes_clients(monkeypatch, core, custom)
 
     with pytest.raises(Exception) as raised:
-        await discoverer.list_queues("team-alpha")
+        await discoverer.list_queues(Mock(), "team-alpha")
 
     assert getattr(raised.value, "status_code", None) == 503
     assert getattr(raised.value, "code", None) == "backend_unavailable"
@@ -136,3 +159,16 @@ def test_queue_endpoint_does_not_discover_when_authorization_is_denied() -> None
 
     assert response.status_code == 403
     assert discoverer.projects == []
+
+
+def test_kubernetes_queue_discovery_rejects_missing_items(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    discoverer = KubernetesQueueDiscoverer()
+    core = Mock()
+    custom = Mock()
+    custom.list_namespaced_custom_object.return_value = {}
+    mocked_kubernetes_clients(monkeypatch, core, custom)
+
+    with pytest.raises(queue_discovery.QueueDiscoveryUnavailable):
+        discoverer._list_queues(Mock(), "team-alpha")
