@@ -38,11 +38,6 @@ authentication:
   tokenReview:
     enabled: true
 
-# The service checks the caller's LocalQueue permission before it uses this
-# narrowly scoped service-account read to retrieve the API response.
-queueDiscovery:
-  enabled: true
-
 # By default the service discovers GatewayConfig/default-gateway status.domain
 # on log requests. Set gatewayURL only to override discovery for a custom platform.
 logBackend:
