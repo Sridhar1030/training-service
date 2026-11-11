@@ -22,6 +22,7 @@ from training_service.contract import component_validator, contract_document, lo
 from training_service.errors import ApiError
 from training_service.jobs import CodeFlareJobBackend, JobsBackend, JobSubmitter
 from training_service.logs import log_stream_timeout_seconds
+from training_service.queue_discovery import KubernetesQueueDiscoverer, QueueDiscoverer
 from training_service_api.apis.estimations_api import router as estimations_router
 from training_service_api.apis.infrastructure_discovery_api import router as discovery_router
 from training_service_api.apis.observability_api import router as observability_router
@@ -82,6 +83,7 @@ def create_app(
     authorizer: OpenShiftProjectAuthorizer | None = None,
     submitter: JobSubmitter | None = None,
     backend: JobsBackend | None = None,
+    queue_discoverer: QueueDiscoverer | None = None,
 ) -> FastAPI:
     """Create the HTTP application."""
     contract = load_contract()
@@ -106,6 +108,7 @@ def create_app(
     application.state.log_stream_timeout_seconds = log_stream_timeout_seconds()
     application.state.token_authenticator = authenticator or KubernetesTokenAuthenticator()
     application.state.project_authorizer = authorizer or KubernetesProjectAuthorizer()
+    application.state.queue_discoverer = queue_discoverer or KubernetesQueueDiscoverer()
     application.state.job_backend = backend or CodeFlareJobBackend()
     application.state.job_submitter = submitter or application.state.job_backend
 

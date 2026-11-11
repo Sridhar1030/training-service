@@ -4,12 +4,14 @@ import anyio
 from fastapi import Request
 
 from training_service import algorithm_discovery
+from training_service.queue_discovery import QueueDiscoverer
 from training_service_api.apis.infrastructure_discovery_api_base import (
     BaseInfrastructureDiscoveryApi,
 )
 from training_service_api.models.algorithm_details import AlgorithmDetails
 from training_service_api.models.extra_models import TokenModel
 from training_service_api.models.list_algorithms200_response import ListAlgorithms200Response
+from training_service_api.models.queue_info_response import QueueInfoResponse
 
 
 class InfrastructureDiscoveryApi(BaseInfrastructureDiscoveryApi):
@@ -18,6 +20,13 @@ class InfrastructureDiscoveryApi(BaseInfrastructureDiscoveryApi):
     ) -> ListAlgorithms200Response:
         result = await anyio.to_thread.run_sync(algorithm_discovery.list_algorithms, request)
         return ListAlgorithms200Response.model_validate(result)
+
+    async def list_queues(
+        self, project: str, token_OpenShiftBearer: TokenModel, request: Request
+    ) -> QueueInfoResponse:
+        del token_OpenShiftBearer
+        discoverer: QueueDiscoverer = request.app.state.queue_discoverer
+        return await discoverer.list_queues(project)
 
     async def get_algorithm(
         self, name: str, include: str | None, token_OpenShiftBearer: TokenModel, request: Request

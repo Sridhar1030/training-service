@@ -791,6 +791,7 @@ paths:
         and an empty queues list. Does not create, update, or delete queues or
         expose cluster-wide quota information.
       operationId: listQueues
+      x-request-context: true
       x-project-authorization:
         group: kueue.x-k8s.io
         resource: localqueues

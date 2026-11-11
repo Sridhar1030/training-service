@@ -70,6 +70,7 @@ class BaseInfrastructureDiscoveryApi:
             ),
         ],
         token_OpenShiftBearer: TokenModel,
+        request: Request,
     ) -> QueueInfoResponse:
         """List available Kueue LocalQueues in the OpenShift Project (if Kueue is enabled)"""
         raise ApiError(501, "not_implemented", "This operation is not implemented.")

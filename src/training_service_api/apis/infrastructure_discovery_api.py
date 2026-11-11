@@ -203,6 +203,5 @@ async def list_queues(
     )
     implementation = BaseInfrastructureDiscoveryApi.implementation()
     return await implementation.list_queues(
-        project,
-        token_OpenShiftBearer=token_OpenShiftBearer,
+        project, token_OpenShiftBearer=token_OpenShiftBearer, request=request
     )
