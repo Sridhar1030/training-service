@@ -41,7 +41,7 @@ class TrainingConfiguration(ContractModel):
         json_schema_extra={"examples": ["team-alpha-local-queue"]},
     )
     backend: JobBackend | None = JobBackend.RAY
-    model: ModelSpec
+    model: ModelSpec | None = None
     dataset: DatasetSpec
     algorithm: AlgorithmSpec
     resources: ResourceSpec | None = None

@@ -98,9 +98,15 @@ paths:
     post:
       summary: "Submit a training job"
       description: >-
-        Validate and submit a training job in the specified project. Reference existing model,
-        dataset, and output storage in that project. An S3 or PVC output destination is required
-        to retain trained model artifacts. Use the returned ID to check status or retrieve logs.
+        Validate and submit a training job in the specified project through the
+        CodeFlare/Ray SDK. Reference existing model, dataset, and output storage
+        in that project. An S3 or PVC output destination is required to retain
+        trained model artifacts. GEPA prompt optimization is the exception to
+        the model-input requirement: omit model, provide a JSONL dataset with
+        input and answer columns, and set seed_candidate, task_lm, and an
+        OpenAI-compatible api_base reachable from the Ray pod. GEPA uses one
+        CPU-only node and does not accept inline API credentials or W&B/MLflow
+        tracking options. Use the returned ID to check status or retrieve logs.
       operationId: createTrainingJob
       x-submission-context: true
       x-project-authorization:
@@ -801,7 +807,6 @@ components:
       additionalProperties: false
       required:
         - name
-        - model
         - dataset
         - algorithm
       properties:
@@ -823,6 +828,7 @@ components:
           $ref: '#/components/schemas/JobBackend'
         model:
           $ref: '#/components/schemas/ModelSpec'
+          description: Required for model-training algorithms; omit for GEPA prompt optimization.
         dataset:
           $ref: '#/components/schemas/DatasetSpec'
         algorithm:

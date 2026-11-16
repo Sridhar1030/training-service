@@ -39,6 +39,7 @@ from training_service.main import create_app
 from training_service.ray_entrypoint import _dataset_format, get_backend
 from training_service_api.models.create_job_request import CreateJobRequest
 from training_service_api.models.error_response import ErrorResponse
+from training_service_api.models.training_configuration import TrainingConfiguration
 
 
 def _sample(name: str = "pvc_inputs_output") -> CreateJobRequest:
@@ -1078,7 +1079,8 @@ def test_all_post_contract_examples_match_algorithm_validation() -> None:
 
 def test_runtime_catalog_covers_registered_execution_profiles() -> None:
     names = {item["name"] for item in catalog.load_catalog()["algorithms"]}
-    assert set(ray_entrypoint._BACKENDS) <= names
+    # The retained 0.8.1 snapshot predates these Training Hub 0.11.2 algorithms.
+    assert set(ray_entrypoint._BACKENDS) - {"gepa", "embedding_sft"} <= names
     algorithm_spec = load_contract()["components"]["schemas"]["AlgorithmSpec"]
     assert "x-parameter-schemas" not in algorithm_spec
     assert "properties" not in algorithm_spec["properties"]["parameters"]
@@ -1086,6 +1088,328 @@ def test_runtime_catalog_covers_registered_execution_profiles() -> None:
         assert get_backend(name).name == name
     with pytest.raises(ValueError, match="Unsupported Training Hub algorithm"):
         get_backend("unreviewed_algorithm")
+
+
+def _catalog_with_new_algorithms(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    payload = json.loads(json.dumps(catalog.load_catalog()))
+    payload["algorithms"].extend(
+        [
+            {
+                "name": "gepa",
+                "supported_backends": ["ray"],
+                "parameter_schema": {
+                    "type": "object",
+                    "properties": {
+                        "seed_candidate": {
+                            "type": "object",
+                            "additionalProperties": {"type": "string"},
+                        },
+                        "task_lm": {"type": "string"},
+                        "api_base": {"type": "string"},
+                    },
+                    "required": ["seed_candidate", "task_lm"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "embedding_sft",
+                "supported_backends": ["ray"],
+                "parameter_schema": {
+                    "type": "object",
+                    "properties": {
+                        "loss_type": {"type": "string"},
+                        "text_column": {"type": "string"},
+                        "label_column": {"type": "string"},
+                        "batch_sampler": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+        ]
+    )
+    path = tmp_path / "new-algorithms-catalog.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setenv("TRAINING_SERVICE_CATALOG_PATH", str(path))
+    catalog._load_catalog.cache_clear()
+
+
+def _gepa_request(
+    *, model: bool = False, resources: dict[str, Any] | None = None
+) -> CreateJobRequest:
+    payload = _sample().model_dump(mode="json", exclude_unset=True)
+    payload["algorithm"] = {
+        "name": "gepa",
+        "parameters": {
+            "seed_candidate": {"system_prompt": "Answer concisely"},
+            "task_lm": "openai/local-model",
+            "api_base": "http://vllm.team-alpha.svc:8000/v1",
+        },
+    }
+    if not model:
+        payload.pop("model")
+    if resources is None:
+        payload.pop("resources")
+    else:
+        payload["resources"] = resources
+    return CreateJobRequest.model_validate(payload)
+
+
+def test_gepa_recorded_configuration_does_not_require_model() -> None:
+    payload = _gepa_request().model_dump(mode="json", exclude_unset=True)
+    assert "model" not in TrainingConfiguration.model_validate(payload).model_dump(
+        mode="json", exclude_unset=True
+    )
+
+
+def test_gepa_submits_cpu_only_without_dummy_model(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _catalog_with_new_algorithms(monkeypatch, tmp_path)
+    core = _mock_sdk(monkeypatch)
+    entrypoint: dict[str, Any] = {}
+    monkeypatch.setattr(
+        submission, "_entrypoint", lambda config: entrypoint.update(config) or "python -c pass"
+    )
+    body = _gepa_request()
+    submitter = submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")
+    assert (
+        submitter._submit_sync("team-alpha", body, CallerIdentity("alice", None, ()), "token")
+        == body.name
+    )
+    assert core.pvc_reads == [("training-data", "team-alpha"), ("training-output", "team-alpha")]
+    assert "model" not in entrypoint
+    assert entrypoint["algorithm"] == "gepa"
+    cluster = FakeRayJob.instances[0].kwargs["cluster_config"]
+    assert cluster.num_workers == 0
+    assert cluster.head_extended_resource_requests == {}
+
+
+@pytest.mark.parametrize(
+    "change,expected",
+    [
+        ({"model": True}, "does not use model.uri"),
+        ({"resources": {"num_nodes": 1, "gpus_per_node": 1}}, "CPU-only"),
+        ({"resources": {"num_nodes": 2, "gpus_per_node": 0}}, "CPU-only"),
+    ],
+)
+def test_gepa_rejects_incompatible_request_before_sdk(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, change: dict[str, Any], expected: str
+) -> None:
+    _catalog_with_new_algorithms(monkeypatch, tmp_path)
+    core = _mock_sdk(monkeypatch)
+    with pytest.raises(ApiError, match=expected):
+        submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")._submit_sync(
+            "team-alpha", _gepa_request(**change), CallerIdentity("alice", None, ()), "token"
+        )
+    assert core.pvc_reads == []
+    assert FakeRayJob.instances == []
+
+
+def test_gepa_rejects_missing_or_invalid_endpoint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _catalog_with_new_algorithms(monkeypatch, tmp_path)
+    for api_base in (
+        None,
+        "https://token@example.com/v1",
+        "http://model:abc/v1",
+        "http://model:70000/v1",
+        "http://model:0/v1",
+    ):
+        body = _gepa_request()
+        if api_base is None:
+            body.algorithm.parameters.pop("api_base")
+        else:
+            body.algorithm.parameters["api_base"] = api_base
+        with pytest.raises(ApiError, match="api_base"):
+            submission._validate_request(body)
+
+
+def test_embedding_sft_requires_model_and_its_dataset_columns(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _catalog_with_new_algorithms(monkeypatch, tmp_path)
+    body = _sample()
+    body.algorithm.name = "embedding_sft"
+    body.algorithm.parameters = {"text_column": "sentence", "label_column": "category"}
+    submission._validate_request(body)
+    validate_dataset_columns("embedding_sft", body.algorithm.parameters, {"sentence", "category"})
+    with pytest.raises(ApiError, match="category"):
+        validate_dataset_columns("embedding_sft", body.algorithm.parameters, {"sentence"})
+    payload = body.model_dump(mode="json", exclude_unset=True)
+    payload.pop("model")
+    body = CreateJobRequest.model_validate(payload)
+    with pytest.raises(ApiError, match="requires model.uri"):
+        submission._validate_request(body)
+
+
+@pytest.mark.parametrize("algorithm", ["gepa", "embedding_sft"])
+def test_new_profiles_dispatch_to_training_hub_classes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, algorithm: str
+) -> None:
+    recorded: dict[str, Any] = {}
+    expected_backend = "gepa" if algorithm == "gepa" else "sentence-transformers"
+
+    def factory(name: str, backend: str) -> Any:
+        assert (name, backend) == (algorithm, expected_backend)
+        return SimpleNamespace(train=lambda **kwargs: recorded.update(kwargs))
+
+    monkeypatch.setitem(sys.modules, "training_hub", SimpleNamespace(create_algorithm=factory))
+    parameters = (
+        {"seed_candidate": {"system_prompt": "Hi"}, "task_lm": "openai/local"}
+        if algorithm == "gepa"
+        else {"num_epochs": 1}
+    )
+    ray_entrypoint._run_training(
+        algorithm,
+        None if algorithm == "gepa" else "/model",
+        "/data.jsonl",
+        tmp_path,
+        parameters,
+        0 if algorithm == "gepa" else 1,
+        0,
+    )
+    assert recorded["data_path"] == "/data.jsonl"
+    if algorithm == "gepa":
+        assert "model_path" not in recorded
+        assert "ckpt_output_dir" not in recorded
+        assert recorded["output_dir"] == str(tmp_path)
+    else:
+        assert recorded["model_path"] == "/model"
+        assert recorded["ckpt_output_dir"] == str(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "pvc://training-data/datasets/prompts.csv",
+        "pvc://training-data/datasets/prompts.json",
+        "pvc://training-data/datasets/prompts.parquet",
+        "s3://training-data/bucket/prompts.csv",
+        "s3://training-data/bucket/prompts.json",
+        "s3://training-data/bucket/prompts.parquet",
+        "s3://training-data/bucket/prompts/",
+    ],
+)
+def test_gepa_rejects_non_jsonl_dataset_before_rayjob(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, uri: str
+) -> None:
+    _catalog_with_new_algorithms(monkeypatch, tmp_path)
+    core = _mock_sdk(monkeypatch)
+    body = _gepa_request()
+    payload = body.model_dump(mode="json", exclude_unset=True)
+    payload["dataset"]["uri"] = uri
+    with pytest.raises(ApiError, match=r"\.jsonl") as raised:
+        submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")._submit_sync(
+            "team-alpha",
+            CreateJobRequest.model_validate(payload),
+            CallerIdentity("alice", None, ()),
+            "token",
+        )
+    assert raised.value.status_code == 422
+    assert core.pvc_reads == []
+    assert core.secret_reads == []
+    assert FakeRayJob.instances == []
+
+
+def test_gepa_hf_dataset_missing_required_column_fails_before_rayjob(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _catalog_with_new_algorithms(monkeypatch, tmp_path)
+    _mock_sdk(monkeypatch)
+    monkeypatch.setattr(submission, "validate_hf_dataset", lambda *_args, **_kwargs: {"answer"})
+    payload = _gepa_request().model_dump(mode="json", exclude_unset=True)
+    payload["dataset"]["uri"] = "hf://hf-secret-token/example/prompts"
+    with pytest.raises(ApiError, match="input") as raised:
+        submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")._submit_sync(
+            "team-alpha",
+            CreateJobRequest.model_validate(payload),
+            CallerIdentity("alice", None, ()),
+            "token",
+        )
+    assert raised.value.status_code == 422
+    assert FakeRayJob.instances == []
+
+
+def test_gepa_hf_dataset_known_columns_match_training_hub() -> None:
+    validate_dataset_columns("gepa", {}, {"input", "answer"})
+    with pytest.raises(ApiError, match="answer"):
+        validate_dataset_columns("gepa", {}, {"input"})
+
+
+@pytest.mark.parametrize("algorithm", ["gepa", "embedding_sft"])
+def test_new_algorithm_installer_is_job_local_and_pinned(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, algorithm: str
+) -> None:
+    checks = iter((False, True))
+    monkeypatch.setattr(ray_entrypoint, "_algorithm_modules_available", lambda _name: next(checks))
+    commands: list[list[str]] = []
+
+    def install(command: list[str], **kwargs: Any) -> SimpleNamespace:
+        commands.append(command)
+        assert kwargs["timeout"] == 600
+        assert kwargs["capture_output"] is True
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(ray_entrypoint.subprocess, "run", install)
+    previous_path = list(sys.path)
+    try:
+        ray_entrypoint._ensure_algorithm_runtime(algorithm, tmp_path)
+        assert sys.path[0] == str(tmp_path / algorithm / "site-packages")
+    finally:
+        sys.path[:] = previous_path
+    assert len(commands) == 1
+    assert "--no-deps" in commands[0]
+    assert "--target" in commands[0]
+    if algorithm == "gepa":
+        assert "fastuuid==0.13.5" in commands[0]
+        assert "venv" not in commands[0]
+    else:
+        assert "transformers<5" not in commands[0]
+        assert "scikit-learn==1.7.2" in commands[0]
+    assert "--only-binary=:all:" in commands[-1]
+    assert any(
+        package.startswith("gepa==")
+        if algorithm == "gepa"
+        else package.startswith("sentence-transformers==")
+        for package in commands[-1]
+    )
+
+
+def test_new_algorithm_missing_packages_fail_before_training(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(ray_entrypoint, "_algorithm_modules_available", lambda _name: False)
+    monkeypatch.setattr(
+        ray_entrypoint.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=1),
+    )
+    with pytest.raises(RuntimeError, match="job-local installation failed"):
+        ray_entrypoint._ensure_algorithm_runtime("gepa", tmp_path)
+
+
+def test_gepa_entrypoint_does_not_resolve_an_unused_model(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(ray_entrypoint, "_ensure_algorithm_runtime", lambda *_args: None)
+    monkeypatch.setattr(
+        ray_entrypoint,
+        "_input",
+        lambda location, kind, *_args, **_kwargs: calls.append(kind) or "/data.jsonl",
+    )
+    monkeypatch.setattr(ray_entrypoint, "_run_training", lambda *_args: calls.append("run"))
+    ray_entrypoint.main(
+        {
+            "algorithm": "gepa",
+            "dataset": {"scheme": "pvc", "mount_path": "/data.jsonl"},
+            "parameters": {"seed_candidate": {"system_prompt": "Hi"}, "task_lm": "openai/local"},
+            "gpus_per_node": 0,
+            "num_workers": 0,
+        }
+    )
+    assert calls == ["dataset", "run"]
 
 
 @pytest.mark.parametrize("algorithm", ["sft", "osft", "lora_sft"])
