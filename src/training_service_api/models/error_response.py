@@ -39,6 +39,8 @@ class ErrorResponse(ContractModel):
             "forbidden",
             "not_found",
             "already_exists",
+            "kueue_not_installed",
+            "kueue_project_excluded",
             "logs_not_ready",
             "ray_cluster_gone",
             "unsupported_media_type",
@@ -57,8 +59,9 @@ class ErrorResponse(ContractModel):
         ):
             raise ValueError(
                 "must be one of enum values ('bad_request', 'unauthorized', "
-                "'forbidden', 'not_found', 'already_exists', 'logs_not_ready', "
-                "'ray_cluster_gone', 'unsupported_media_type', 'validation_error', "
+                "'forbidden', 'not_found', 'already_exists', 'kueue_not_installed', "
+                "'kueue_project_excluded', 'logs_not_ready', 'ray_cluster_gone', "
+                "'unsupported_media_type', 'validation_error', "
                 "'authentication_unavailable', 'authorization_unavailable', "
                 "'submission_unavailable', 'not_implemented', 'backend_unavailable', "
                 "'conflict', 'invalid_page_token', 'unowned_cluster', "

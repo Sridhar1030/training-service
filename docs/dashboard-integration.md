@@ -99,5 +99,6 @@ means refresh and retry; shared or unverified ownership is also rejected with
 Errors use `{"code":"...","message":"..."}`. Reauthenticate on 401, show an
 access error on 403, show validation guidance on 400/422, and retry 409
 `logs_not_ready` while a job starts. A 410 means logs are gone; 503 indicates an
-unavailable or misconfigured service/backend. Queue discovery currently returns
-501.
+unavailable or misconfigured service/backend. Queue discovery returns 409 `kueue_not_installed` or `kueue_project_excluded`
+when Kueue is absent or the project is excluded. A healthy eligible project with
+no queues returns 200 with an empty list. Uncertain Kueue readiness returns 503.

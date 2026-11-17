@@ -1,0 +1,59 @@
+{{- if .Values.kueuePreflight.createRBAC }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "training-service.rbacName" . }}-kueue-preflight
+  namespace: {{ .Values.kueuePreflight.namespace }}
+rules:
+  - apiGroups: [apps]
+    resources: [deployments]
+    resourceNames: [{{ .Values.kueuePreflight.deployment | quote }}]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [{{ .Values.kueuePreflight.configMap | quote }}]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [services, endpoints]
+    resourceNames: [{{ .Values.kueuePreflight.service | quote }}]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "training-service.rbacName" . }}-kueue-preflight
+  namespace: {{ .Values.kueuePreflight.namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "training-service.rbacName" . }}-kueue-preflight
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "training-service.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "training-service.rbacName" . }}-kueue-preflight
+rules:
+  - apiGroups: [admissionregistration.k8s.io]
+    resources: [mutatingwebhookconfigurations]
+    resourceNames: [{{ .Values.kueuePreflight.webhook | quote }}]
+    verbs: [get]
+  - nonResourceURLs: [/apis, /apis/kueue.x-k8s.io/*]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "training-service.rbacName" . }}-kueue-preflight
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "training-service.rbacName" . }}-kueue-preflight
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "training-service.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

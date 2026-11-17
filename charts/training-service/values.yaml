@@ -102,3 +102,12 @@ resources: {}
 nodeSelector: {}
 tolerations: []
 affinity: {}
+
+# Named installation resources only. These checks are independent of DSC.
+kueuePreflight:
+  namespace: openshift-kueue-operator
+  deployment: kueue-controller-manager
+  configMap: kueue-manager-config
+  webhook: kueue-mutating-webhook-configuration
+  service: kueue-webhook-service
+  createRBAC: true

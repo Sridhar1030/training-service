@@ -111,6 +111,16 @@ spec:
             - name: HF_HOME
               value: /tmp/huggingface
             {{- end }}
+            - name: TRAINING_KUEUE_NAMESPACE
+              value: {{ .Values.kueuePreflight.namespace | quote }}
+            - name: TRAINING_KUEUE_DEPLOYMENT
+              value: {{ .Values.kueuePreflight.deployment | quote }}
+            - name: TRAINING_KUEUE_CONFIGMAP
+              value: {{ .Values.kueuePreflight.configMap | quote }}
+            - name: TRAINING_KUEUE_WEBHOOK
+              value: {{ .Values.kueuePreflight.webhook | quote }}
+            - name: TRAINING_KUEUE_SERVICE
+              value: {{ .Values.kueuePreflight.service | quote }}
             - name: TRAINING_SERVICE_CATALOG_PATH
               value: /var/run/training-service/catalog/catalog.json
             {{- if $runtimeImage }}

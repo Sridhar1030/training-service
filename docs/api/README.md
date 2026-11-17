@@ -38,7 +38,8 @@ and focused unit tests verify request examples round-trip unchanged.
 
 Authentication, project authorization, submission, job reads, driver logs,
 and job deletion are handwritten outside the generated tree. Algorithm
-discovery is implemented; queue discovery returns `501` until implemented.
+and queue discovery are implemented; queue discovery checks Kueue readiness and
+project eligibility before listing caller-accessible LocalQueues.
 Estimation is not part of the public API.
 
 The POST-only `x-submission-context` preserves the 202 status and Location

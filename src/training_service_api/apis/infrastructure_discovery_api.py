@@ -126,11 +126,13 @@ async def get_algorithm(
 @router.get(
     "/projects/{project}/queues",
     responses={
-        200: {"model": QueueInfoResponse, "description": "LocalQueues in the specified project."},
-        501: {
+        409: {
             "model": ErrorResponse,
-            "description": "The requested operation or training backend is not available.",
+            "description": (
+                "Kueue absent (kueue_not_installed) or project excluded (kueue_project_excluded)"
+            ),
         },
+        200: {"model": QueueInfoResponse, "description": "LocalQueues in the specified project."},
         401: {"model": ErrorResponse, "description": "Missing, invalid, or expired bearer token."},
         503: {
             "model": ErrorResponse,

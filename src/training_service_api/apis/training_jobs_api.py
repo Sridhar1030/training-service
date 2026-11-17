@@ -160,7 +160,10 @@ async def list_training_jobs(
         },
         409: {
             "model": ErrorResponse,
-            "description": "A job with this name already exists in the project.",
+            "description": (
+                "RayJob already exists, Kueue is absent (kueue_not_installed), or "
+                "project is excluded (kueue_project_excluded)"
+            ),
         },
         415: {"model": ErrorResponse, "description": "Request body must use application/json."},
         422: {

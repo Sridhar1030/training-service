@@ -237,7 +237,9 @@ def test_default_install_discovers_ca_with_only_namespace_scoped_named_read_acce
     result = render(tmp_path, {})
     assert result.returncode == 0, result.stderr
     documents = list(yaml.safe_load_all(result.stdout))
-    role = next(d for d in documents if d["kind"] == "Role")
+    role = next(
+        d for d in documents if d["kind"] == "Role" and d["metadata"]["name"].endswith("-log-trust")
+    )
     assert role["metadata"]["namespace"] == "openshift-config-managed"
     assert role["rules"] == [
         {
@@ -247,7 +249,11 @@ def test_default_install_discovers_ca_with_only_namespace_scoped_named_read_acce
             "verbs": ["get"],
         }
     ]
-    binding = next(d for d in documents if d["kind"] == "RoleBinding")
+    binding = next(
+        d
+        for d in documents
+        if d["kind"] == "RoleBinding" and d["metadata"]["name"].endswith("-log-trust")
+    )
     assert binding["metadata"]["namespace"] == role["metadata"]["namespace"]
     assert binding["roleRef"]["kind"] == "Role"
     assert binding["roleRef"]["name"] == role["metadata"]["name"]
@@ -279,8 +285,52 @@ def test_custom_trust_or_gateway_omits_platform_ca_permission(tmp_path, values):
     result = render(tmp_path, values)
     assert result.returncode == 0, result.stderr
     documents = list(yaml.safe_load_all(result.stdout))
-    assert not any(d["kind"] in {"Role", "RoleBinding"} for d in documents)
+    assert not any(
+        d["kind"] in {"Role", "RoleBinding"} and d["metadata"]["name"].endswith("-log-trust")
+        for d in documents
+    )
     pod = next(d for d in documents if d["kind"] == "Deployment")["spec"]["template"]["spec"]
     assert "TRAINING_SERVICE_RAY_CA_DISCOVERY" not in {
         e["name"] for e in pod["containers"][0]["env"]
     }
+
+
+def test_kueue_platform_rbac_is_named_read_only_and_namespace_isolated(tmp_path):
+    names = []
+    for namespace in ("team-a", "team-b"):
+        result = render(tmp_path, {}, namespace=namespace)
+        assert result.returncode == 0, result.stderr
+        resources = [
+            d
+            for d in yaml.safe_load_all(result.stdout)
+            if d["metadata"]["name"].endswith("-kueue-preflight")
+        ]
+        assert {d["kind"] for d in resources} == {
+            "Role",
+            "RoleBinding",
+            "ClusterRole",
+            "ClusterRoleBinding",
+        }
+        names.append({(d["kind"], d["metadata"]["name"]) for d in resources})
+        for resource in resources:
+            if resource["kind"].endswith("Binding"):
+                assert resource["subjects"][0]["namespace"] == namespace
+                assert (resource["roleRef"]["kind"], resource["roleRef"]["name"]) in names[-1]
+            else:
+                for rule in resource["rules"]:
+                    assert rule["verbs"] == ["get"]
+                    if "resources" in rule:
+                        assert len(rule["resourceNames"]) == 1
+                        assert not set(rule["resources"]) & {"secrets", "localqueues", "rayjobs"}
+            if resource["kind"] in {"Role", "RoleBinding"}:
+                assert resource["metadata"]["namespace"] == "openshift-kueue-operator"
+    assert names[0].isdisjoint(names[1])
+
+
+def test_kueue_rbac_can_be_provisioned_externally(tmp_path):
+    result = render(tmp_path, {"kueuePreflight": {"createRBAC": False}})
+    assert result.returncode == 0, result.stderr
+    assert not any(
+        d["metadata"]["name"].endswith("-kueue-preflight")
+        for d in yaml.safe_load_all(result.stdout)
+    )
