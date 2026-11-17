@@ -50,6 +50,7 @@ def mocked_kubernetes_clients(monkeypatch: pytest.MonkeyPatch, core: Mock, custo
     def caller(_: object):
         yield Mock()
 
+    monkeypatch.setattr(queue_discovery, "preflight", Mock(return_value="v1beta2"))
     monkeypatch.setattr(queue_discovery, "caller_client", caller)
     monkeypatch.setattr(queue_discovery.client, "CoreV1Api", lambda _: core)
     monkeypatch.setattr(queue_discovery.client, "CustomObjectsApi", lambda _: custom)
@@ -78,7 +79,7 @@ def test_kubernetes_queue_discovery_maps_local_queue_metadata(
             {"name": "unassigned"},
         ],
     }
-    core.read_namespace.assert_called_once_with("team-alpha", _request_timeout=(5, 15))
+    queue_discovery.preflight.assert_called_once()
     assert custom.list_namespaced_custom_object.call_args.kwargs == {
         "group": "kueue.x-k8s.io",
         "version": "v1beta2",
@@ -101,9 +102,8 @@ def test_kubernetes_queue_discovery_handles_empty_and_missing_kueue(
     )
 
     custom.list_namespaced_custom_object.side_effect = ApiException(status=404)
-    assert discoverer._list_queues(Mock(), "team-alpha") == QueueInfoResponse(
-        kueue_enabled=False, queues=[]
-    )
+    with pytest.raises(queue_discovery.QueueDiscoveryUnavailable):
+        discoverer._list_queues(Mock(), "team-alpha")
 
 
 @pytest.mark.anyio
@@ -172,3 +172,48 @@ def test_kubernetes_queue_discovery_rejects_missing_items(
 
     with pytest.raises(queue_discovery.QueueDiscoveryUnavailable):
         discoverer._list_queues(Mock(), "team-alpha")
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_list_preserves_downstream_authentication_errors(monkeypatch, status):
+    from fastapi import Request
+
+    from training_service import kubernetes_client
+
+    api = Mock()
+    api.__enter__ = Mock(return_value=api)
+    api.__exit__ = Mock(return_value=False)
+    monkeypatch.setattr(kubernetes_client.client, "ApiClient", lambda _: api)
+    monkeypatch.setattr(kubernetes_client, "caller_configuration", lambda _: Mock())
+    monkeypatch.setattr(queue_discovery, "preflight", lambda *_: "v1beta1")
+    custom = Mock()
+    custom.list_namespaced_custom_object.side_effect = ApiException(status=status, reason="private")
+    monkeypatch.setattr(queue_discovery.client, "CustomObjectsApi", lambda _: custom)
+    request = Request({"type": "http", "headers": [(b"authorization", b"Bearer test")]})
+    request.state.caller_identity = CallerIdentity("alice", None, ())
+    from training_service.errors import ApiError
+
+    with pytest.raises(ApiError) as raised:
+        KubernetesQueueDiscoverer()._list_queues(request, "project")
+    assert raised.value.status_code == status
+    assert "private" not in raised.value.message
+
+
+@pytest.mark.parametrize("code", ["kueue_not_installed", "kueue_project_excluded"])
+def test_kueue_error_is_serialized_by_http_contract(code):
+    from training_service.errors import ApiError
+
+    class UnavailableDiscoverer:
+        async def list_queues(self, request, project):
+            raise ApiError(409, code, "Kueue cannot manage this project.")
+
+    client = TestClient(
+        create_app(
+            FakeAuthenticator(), RecordingAuthorizer(), queue_discoverer=UnavailableDiscoverer()
+        )
+    )
+    response = client.get(
+        "/api/v1/projects/team-alpha/queues", headers={"Authorization": "Bearer test"}
+    )
+    assert response.status_code == 409
+    assert response.json()["code"] == code

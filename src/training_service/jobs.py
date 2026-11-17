@@ -38,6 +38,7 @@ from training_service.kubernetes_client import (
     describe_not_found,
     validate_names,
 )
+from training_service.kueue_preflight import preflight
 from training_service.log_config import LogBackendConfig, LogBackendResolver
 from training_service.logs import CodeFlareLogClient, LogClient, logs_not_found, logs_unavailable
 from training_service.ray_entrypoint import get_backend
@@ -441,6 +442,8 @@ class CodeFlareJobBackend:
         }
 
         with _caller_api_client(token) as api_client:
+            if request.queue_name is not None:
+                preflight(api_client, project, request.queue_name)
             core_api = client.CoreV1Api(api_client)
             resolved, volumes, mounts, hf_tokens = _storage_plan(
                 core_api, project, locations, resources.num_nodes or 1

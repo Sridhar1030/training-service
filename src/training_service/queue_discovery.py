@@ -12,16 +12,14 @@ from kubernetes.client.exceptions import ApiException
 
 from training_service.errors import ApiError
 from training_service.kubernetes_client import (
-    TIMEOUT,
     caller_client,
-    describe_not_found,
     validate_names,
 )
+from training_service.kueue_preflight import preflight
 from training_service_api.models.queue_info import QueueInfo
 from training_service_api.models.queue_info_response import QueueInfoResponse
 
 _KUEUE_GROUP = "kueue.x-k8s.io"
-_KUEUE_VERSION = "v1beta2"
 _LOCAL_QUEUE_PLURAL = "localqueues"
 _DISCOVERY_TIMEOUT_SECONDS = 10
 
@@ -51,22 +49,18 @@ class KubernetesQueueDiscoverer:
         """List queues with the verified caller credential, not the service account."""
         validate_names(project)
         with caller_client(request) as api:
-            # A namespaced list can be empty for a namespace that does not exist.
-            # Check only after caller authorization, so this does not leak project existence.
-            with describe_not_found("Project", project):
-                client.CoreV1Api(api).read_namespace(project, _request_timeout=TIMEOUT)
+            version = preflight(api, project)
             try:
                 response = client.CustomObjectsApi(api).list_namespaced_custom_object(
                     group=_KUEUE_GROUP,
-                    version=_KUEUE_VERSION,
+                    version=version,
                     namespace=project,
                     plural=_LOCAL_QUEUE_PLURAL,
                     _request_timeout=_DISCOVERY_TIMEOUT_SECONDS,
                 )
             except ApiException as error:
-                # Kueue itself is optional. A project 404 was handled above.
-                if error.status == 404:
-                    return QueueInfoResponse(kueue_enabled=False, queues=[])
+                if error.status in (401, 403):
+                    raise
                 raise QueueDiscoveryUnavailable from error
 
         if not isinstance(response, Mapping):

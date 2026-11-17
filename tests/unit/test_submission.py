@@ -2245,3 +2245,36 @@ def test_embedded_ray_entrypoint_executes_the_selected_algorithm(
         assert kwargs["model_path"] == str(model)
         assert kwargs["data_path"] == str(dataset)
         assert kwargs["num_epochs"] == 1
+
+
+@pytest.fixture(autouse=True)
+def mock_queue_preflight(monkeypatch):
+    # These tests exercise submission; capability checks have separate Kubernetes mocks.
+    check = Mock(return_value="v1beta2")
+    monkeypatch.setattr(submission, "preflight", check)
+    return check
+
+
+def test_queued_submission_without_get_runs_preflight(monkeypatch, mock_queue_preflight):
+    _mock_sdk(monkeypatch)
+    body = _sample()
+    submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")._submit_sync(
+        "team-alpha", body, CallerIdentity("alice", None, ()), "caller-token"
+    )
+    args = mock_queue_preflight.call_args.args
+    assert args[0].token == "caller-token"
+    assert args[1:] == ("team-alpha", body.queue_name)
+
+
+@pytest.mark.parametrize("code", ["kueue_not_installed", "kueue_project_excluded", "not_found"])
+def test_queue_preflight_failure_prevents_creation(monkeypatch, mock_queue_preflight, code):
+    _mock_sdk(monkeypatch)
+    mock_queue_preflight.side_effect = ApiError(
+        404 if code == "not_found" else 409, code, "Unavailable"
+    )
+    with pytest.raises(ApiError) as error:
+        submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")._submit_sync(
+            "team-alpha", _sample(), CallerIdentity("alice", None, ()), "caller-token"
+        )
+    assert error.value.code == code
+    assert FakeRayJob.instances == []

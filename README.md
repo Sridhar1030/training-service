@@ -28,8 +28,8 @@ Supported submission profiles are `sft`, `osft`, `lora_sft`, and `lora_grpo`.
 Discovery and submission validation use the same catalog from the configured
 training image. Check [runtime compatibility](docs/training-runtime.md) before
 selecting an image; GRPO requires a compatible verl/TRL runtime. The queue
-discovery endpoint is reserved for listing project LocalQueues with Kueue enabled
-in RHOAI; it currently returns `501` until implemented.
+discovery endpoint lists project LocalQueues after checking Kueue readiness and
+project eligibility. See [Kueue preflight](docs/kueue-preflight.md) for setup and errors.
 
 ## Development
 

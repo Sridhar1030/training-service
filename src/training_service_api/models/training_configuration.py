@@ -35,8 +35,16 @@ class TrainingConfiguration(ContractModel):
     queue_name: StrictStr | None = Field(
         default=None,
         description=(
-            "Queue in the target project. If omitted, a configured default queue "
-            "is used; otherwise submission is unqueued."
+            "Optional Kueue LocalQueue in the target project. When supplied, "
+            "submission repeats Kueue readiness, project eligibility and "
+            "caller-authenticated queue existence checks without requiring a "
+            "preceding GET. Creation is not admission; jobs may wait for quota or "
+            "GPUs. Absence or exclusion returns 409, missing queues return 404, "
+            "caller denial 403 and uncertain readiness 503. When omitted, "
+            "CodeFlare uses a configured default LocalQueue if one exists; "
+            "otherwise the job is submitted without a queue. Subject to caller "
+            "permissions and platform admission policy; this does not grant "
+            "access. "
         ),
         json_schema_extra={"examples": ["team-alpha-local-queue"]},
     )

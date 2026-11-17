@@ -229,7 +229,7 @@ paths:
         '404':
           $ref: '#/components/responses/404NotFound'
         '409':
-          description: "A job with this name already exists in the project."
+          description: RayJob already exists, Kueue is absent (kueue_not_installed), or project is excluded (kueue_project_excluded)
           content:
             application/json:
               schema:
@@ -638,9 +638,15 @@ paths:
   /projects/{project}/queues:
     get:
       summary: "List Kueue LocalQueues"
-      description: >-
-        List LocalQueues in the specified project. Kueue must be enabled in RHOAI. This endpoint
-        is not yet implemented and currently returns 501.
+      description: >
+        Read-only submission helper. Queries Kubernetes APIs directly using the
+        caller's identity and permissions in the target project. Kueue is
+        optional; absence returns 409 kueue_not_installed, and an excluded project
+        returns 409 kueue_project_excluded. Uncertain readiness returns 503, never
+        a disabled result. Healthy, eligible projects return 200 even with no queues.
+        Platform health/configuration reads use narrowly scoped service credentials;
+        project and LocalQueue reads use caller credentials. Does not modify queues or
+        expose cluster-wide quota information.
       operationId: listQueues
       x-request-context: true
       x-project-authorization:
@@ -652,14 +658,18 @@ paths:
       parameters:
         - $ref: '#/components/parameters/Project'
       responses:
+        '409':
+          description: Kueue absent (kueue_not_installed) or project excluded (kueue_project_excluded)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '200':
           description: "LocalQueues in the specified project."
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/QueueInfoResponse'
-        '501':
-          $ref: '#/components/responses/501NotImplemented'
         '401':
           $ref: '#/components/responses/401Unauthorized'
         '503':
@@ -816,9 +826,15 @@ components:
         queue_name:
           type: string
           nullable: true
-          description: >-
-            Queue in the target project. If omitted, a configured default queue is used;
-            otherwise submission is unqueued.
+          description: >
+            Optional Kueue LocalQueue in the target project. When supplied, submission
+            repeats Kueue readiness, project eligibility and caller-authenticated queue
+            existence checks without requiring a preceding GET. Creation is not admission;
+            jobs may wait for quota or GPUs. Absence or exclusion returns 409, missing
+            queues return 404, caller denial 403 and uncertain readiness 503. When omitted,
+            CodeFlare uses a configured default LocalQueue if one exists;
+            otherwise the job is submitted without a queue. Subject to caller
+            permissions and platform admission policy; this does not grant access.
           example: team-alpha-local-queue
         backend:
           $ref: '#/components/schemas/JobBackend'
@@ -1139,7 +1155,7 @@ components:
       properties:
         kueue_enabled:
           type: boolean
-          description: "Whether Kueue is enabled in RHOAI."
+          description: True after Kueue readiness and project eligibility checks pass; not a guarantee of workload admission.
         queues:
           type: array
           items:
@@ -1242,6 +1258,8 @@ components:
             - forbidden
             - not_found
             - already_exists
+            - kueue_not_installed
+            - kueue_project_excluded
             - logs_not_ready
             - ray_cluster_gone
             - unsupported_media_type

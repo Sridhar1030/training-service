@@ -13,7 +13,8 @@ Ray resources or chooses a Ray SDK client.
 Each generated API group selects exactly one registered handler. Missing
 handlers and unimplemented base methods return 501; duplicate registrations
 fail closed. No per-operation dispatcher or compatibility registry is needed.
-Algorithm discovery is implemented. Queue discovery returns 501 until implemented.
+Algorithm and queue discovery are implemented. Queue discovery validates Kueue
+readiness and project eligibility before caller-authenticated LocalQueue reads.
 
 Generated routes authenticate and authorize before invoking handlers. Job
 resource authorization uses the configured backend's API group and resource;

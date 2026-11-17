@@ -19,7 +19,12 @@ class QueueInfoResponse(ContractModel):
     Schema: QueueInfoResponse in docs/api/openapi.yaml.
     """
 
-    kueue_enabled: StrictBool = Field(description="Whether Kueue is enabled in RHOAI.")
+    kueue_enabled: StrictBool = Field(
+        description=(
+            "True after Kueue readiness and project eligibility checks pass; not a "
+            "guarantee of workload admission."
+        )
+    )
     queues: list[QueueInfo]
 
     model_config = ConfigDict(
