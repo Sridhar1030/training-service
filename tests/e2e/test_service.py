@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from tests.e2e.algorithms import ALGORITHMS, PARAMETERS
+from tests.e2e.algorithms import BASE_ALGORITHMS, PARAMETERS
 
 
 @pytest.mark.parametrize("path", ["/healthz", "/readyz"])
@@ -348,7 +348,7 @@ def test_rejected_submission_creates_no_job(api, missing_job_id, pytestconfig, v
         api.cleanup(payload["name"], pytestconfig.getoption("cleanup_timeout"), payload)
 
 
-@pytest.mark.parametrize("algorithm", ALGORITHMS)
+@pytest.mark.parametrize("algorithm", BASE_ALGORITHMS)
 @pytest.mark.parametrize("invalid", ["unsupported", "malformed"])
 def test_algorithm_parameters_rejected_before_submission(
     api, missing_job_id, pytestconfig, algorithm, invalid

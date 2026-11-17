@@ -127,14 +127,6 @@ def _invalid(message: str) -> ApiError:
     return ApiError(422, "validation_error", message)
 
 
-def _gpu_count(resources: ResourceSpec, default: int) -> int:
-    return (
-        resources.gpus_per_node
-        if "gpus_per_node" in resources.model_fields_set and resources.gpus_per_node is not None
-        else default
-    )
-
-
 def _parse_location(uri: str, *, output: bool = False) -> dict[str, str]:
     if output:
         try:
@@ -200,25 +192,20 @@ def _validate_request(
     parameters = validate_algorithm_parameters(
         request.algorithm.name, request.algorithm.parameters, runtime_image
     )
-    backend = get_backend(request.algorithm.name)
-    if backend.requires_model and request.model is None:
-        raise _invalid(f"Algorithm '{backend.name}' requires model.uri.")
-    if not backend.requires_model and request.model is not None:
-        raise _invalid(f"Algorithm '{backend.name}' does not use model.uri; omit model.")
     if request.queue_name is not None and (
         len(request.queue_name) > 63 or not _NAME_PATTERN.fullmatch(request.queue_name)
     ):
         raise _invalid("queue_name must be a DNS-1123 label.")
-    resources = request.resources.model_copy() if request.resources is not None else ResourceSpec()
+    resources = request.resources or ResourceSpec()
     cpu = resources.cpus_per_node or "4"
     memory = resources.memory_per_node or "16Gi"
     if not _CPU_PATTERN.fullmatch(cpu) or not _MEMORY_PATTERN.fullmatch(memory):
         raise _invalid("CPU or memory resource quantity is invalid.")
     if resources.gpu_type is not None and resources.gpu_type not in _GPU_TYPES:
         raise _invalid("gpu_type must be a supported GPU resource name.")
-    gpu_count = _gpu_count(resources, backend.default_gpu_count)
+    gpu_count = resources.gpus_per_node if resources.gpus_per_node is not None else 1
     try:
-        backend.validate_resources(
+        get_backend(request.algorithm.name).validate_resources(
             gpu_count, resources.num_nodes or 1, resources.gpu_type or "nvidia.com/gpu", parameters
         )
     except ValueError as error:
@@ -422,10 +409,10 @@ class CodeFlareJobBackend:
         if not self._image:
             raise ApiError(503, "submission_unavailable", "A Ray training image is not configured.")
         resources, parameters = _validate_request(request, self._image)
-        locations = {}
-        if request.model is not None:
-            locations["model"] = _parse_location(request.model.uri.root)
-        locations["dataset"] = _parse_location(request.dataset.uri.root)
+        locations = {
+            "model": _parse_location(request.model.uri.root),
+            "dataset": _parse_location(request.dataset.uri.root),
+        }
         dataset_options = request.dataset.model_dump(exclude={"uri"}, exclude_none=True)
         if dataset_options:
             if locations["dataset"]["scheme"] != "hf":
@@ -458,7 +445,7 @@ class CodeFlareJobBackend:
             resolved, volumes, mounts, hf_tokens = _storage_plan(
                 core_api, project, locations, resources.num_nodes or 1
             )
-            if "model" in locations and locations["model"]["scheme"] == "hf":
+            if locations["model"]["scheme"] == "hf":
                 validate_hf_model(
                     locations["model"]["repository"], hf_tokens[locations["model"]["name"]]
                 )
@@ -472,7 +459,7 @@ class CodeFlareJobBackend:
                 )
                 validate_dataset_columns(request.algorithm.name, parameters, columns)
             gpu_type = resources.gpu_type or "nvidia.com/gpu"
-            gpu_count = _gpu_count(resources, backend.default_gpu_count)
+            gpu_count = resources.gpus_per_node if resources.gpus_per_node is not None else 1
             cpu = resources.cpus_per_node or "4"
             memory = resources.memory_per_node or "16Gi"
             workers = (resources.num_nodes or 1) - 1

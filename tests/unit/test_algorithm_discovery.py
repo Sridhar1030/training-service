@@ -124,6 +124,24 @@ def test_list_is_compact_and_preserves_runtime(client: TestClient, image_catalog
     assert catalog.validate_catalog(image_catalog) == image_catalog
 
 
+def test_gepa_is_not_advertised_or_submittable(client, catalog_file, image_catalog):
+    image_catalog["algorithms"].append(
+        {
+            "name": "gepa",
+            "supported_backends": ["ray"],
+            "parameter_schema": {"type": "object", "properties": {}},
+        }
+    )
+    catalog_file.write_text(json.dumps(image_catalog))
+    response = client.get(BASE, headers=HEADERS)
+    assert response.status_code == 200
+    assert "gepa" not in {item["name"] for item in response.json()["algorithms"]}
+    assert client.get(BASE + "/gepa", headers=HEADERS).status_code == 404
+    with pytest.raises(ApiError, match="not enabled") as raised:
+        catalog.validate_parameters("gepa", {}, "ray")
+    assert raised.value.status_code == 422
+
+
 def test_detail_lists_every_parameter_without_fabricating_defaults(client: TestClient) -> None:
     response = client.get(BASE + "/lora_sft", headers=HEADERS)
     assert response.status_code == 200

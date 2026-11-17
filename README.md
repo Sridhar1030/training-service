@@ -25,7 +25,7 @@ model artifacts remain available after job cleanup.
   [OpenAPI contract](https://github.com/opendatahub-io/training-service/blob/main/docs/api/openapi.yaml).
 
 Supported submission profiles are `sft`, `osft`, `lora_sft`, `lora_grpo`,
-`embedding_sft`, and `gepa`.
+and `embedding_sft`.
 Discovery and submission validation use the same catalog from the configured
 training image. Check [runtime compatibility](docs/training-runtime.md) before
 selecting an image; GRPO requires a compatible verl/TRL runtime. The queue
@@ -33,12 +33,10 @@ discovery endpoint is reserved for listing project LocalQueues with Kueue enable
 in RHOAI; it currently returns `501` until implemented.
 
 Embedding SFT requires a model and a dataset with `text` and `label` columns
-(or mapped column names). GEPA is CPU-only and does not use a model; it requires
-`seed_candidate`, `task_lm`, `api_base`, and a JSONL dataset with `input` and
-`answer` columns. GEPA PVC/S3 dataset URIs must name an explicit `.jsonl` file.
-The Ray driver temporarily installs pinned GEPA and sentence-transformers
-dependencies into a job-local environment if the runtime lacks them. This
-requires access to a package index until the runtime image includes the extras.
+(or mapped column names). The Ray driver temporarily installs pinned
+sentence-transformers dependencies into a job-local environment if the runtime
+lacks them. This requires access to a package index until the runtime image
+includes the extra.
 
 ## Development
 

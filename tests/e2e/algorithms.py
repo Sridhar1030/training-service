@@ -2,13 +2,16 @@
 
 from copy import deepcopy
 
-ALGORITHMS = ("sft", "osft", "lora_sft", "lora_grpo")
+BASE_ALGORITHMS = ("sft", "osft", "lora_sft", "lora_grpo")
+NEW_ALGORITHMS = ("embedding_sft",)
+ALGORITHMS = BASE_ALGORITHMS + NEW_ALGORITHMS
 
 DATASETS = {
     "sft": "tiny-chat.jsonl",
     "osft": "tiny-chat.jsonl",
     "lora_sft": "tiny-chat.jsonl",
     "lora_grpo": "tiny-math.jsonl",
+    "embedding_sft": "tiny-embedding.jsonl",
 }
 
 PARAMETERS = {
@@ -45,6 +48,12 @@ PARAMETERS = {
         "num_iterations": 1,
         "group_size": 4,
         "prompt_batch_size": 4,
+    },
+    "embedding_sft": {
+        "loss_type": "batch_all_triplet",
+        "num_epochs": 1,
+        "batch_size": 6,
+        "learning_rate": 0.0001,
     },
 }
 

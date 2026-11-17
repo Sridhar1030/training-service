@@ -50,20 +50,39 @@ From the repository root:
 make test-e2e-deploy E2E_ARGS="--image-repository quay.io/YOUR_ORG/training-service --storage-class YOUR_RWX_CLASS"
 ```
 
-This keeps PR #10's baseline `lora_sft` lifecycle. To run the **four-algorithm
-matrix** on the same isolated deployment, add `--algorithm-matrix` to `E2E_ARGS`.
+This keeps PR #10's baseline `lora_sft` lifecycle. To run the **five-algorithm
+matrix** on the same isolated deployment, add `--algorithm-matrix`:
+
+```bash
+make test-e2e-deploy E2E_ARGS="--image-repository quay.io/YOUR_ORG/training-service --storage-class YOUR_RWX_CLASS --algorithm-matrix"
+```
+
+The matrix is opt-in. A stopped local Podman VM makes `podman info` fail **before**
+the runner creates a namespace; check `podman machine list` and start the VM
+before running a build. `--use-podman-auth` is only needed for a private Quay
+repository.
+
+To validate **only Embedding SFT** without waiting for the other algorithms
+(including the known-broken GRPO fixture), replace
+`--algorithm-matrix` with `--embedding-sft-only` in the command above. This
+still runs the HTTP checks and active LoRA cancellation checks. The runner
+requires the Embedding SFT job to succeed and verifies its logs, output and cleanup;
+it does not count a skipped job as a pass.
 Both modes also submit two isolated LoRA jobs and delete them while `PENDING`
 and `RUNNING`, verifying RayCluster/pod cleanup and a final `404`. The deploy
 runner always enables `--check-active-delete` and requires evidence for both
 states; skipped cancellation tests cannot produce a passing run. Against an
 existing deployment, add `--check-active-delete` to `make test-e2e`'s arguments.
-It submits separate `sft`, `osft`, `lora_sft` and `lora_grpo` jobs, checks
-accepted requests and preserved parameters, waits for `SUCCEEDED`, reads log snapshots,
-checks output files and verifies owner-scoped cleanup. The fixture prepares chat
-and math JSONL datasets. GRPO needs a GPU-free Ray head plus a GPU worker, so
+It submits separate `sft`, `osft`, `lora_sft`, `lora_grpo` and `embedding_sft`
+jobs, checks accepted requests and preserved parameters, waits for
+`SUCCEEDED`, reads log snapshots, checks output files and verifies owner-scoped
+cleanup. The fixture prepares chat, math and embedding JSONL datasets.
+GRPO needs a
+GPU-free Ray head plus a GPU worker, so
 the ClusterQueue must admit the larger request. The selected Ray/Training Hub
-runtime must actually support all four backends; the test does not install or
-repair runtime dependencies. A known verl/TRL import failure is reported as a
+runtime must actually support all five backends; the test does not install or
+repair runtime dependencies beyond the service's normal job-local setup. A known
+verl/TRL import failure is reported as a
 failed GRPO test, never counted as a pass.
 The math GRPO fixture also requires a runtime exposing `reward_type`. The stock
 Training Hub 0.11.2 catalog does not expose it, so that fixture currently returns
@@ -79,7 +98,8 @@ make test-e2e-deploy E2E_ARGS="--image-repository quay.io/YOUR_ORG/training-serv
 
 Against an existing deployment, use `make test-e2e` with `--algorithm-matrix`
 and `--job-file` pointing to a PVC template whose dataset is under `datasets/`.
-Stage `tiny-chat.jsonl` and `tiny-math.jsonl` in that same PVC first. The
+Stage `tiny-chat.jsonl`, `tiny-math.jsonl` and `tiny-embedding.jsonl` in that
+same PVC first. The
 matrix's algorithm-specific parameters are in
 [`algorithms.py`](algorithms.py); each request is stored unchanged in the job
 detail. This is representative end-to-end coverage, not an exhaustive test of
@@ -298,8 +318,9 @@ deployment runner. Supply a known-good [workload JSON](examples/job.example.json
 PVC/model/dataset/output references and a prepared
 [read-only verifier pod](examples/artifact-verifier.example.yaml). Use discovery to
 check the algorithms and parameters available in the configured runtime. The default
-sanity workload uses `lora_sft`; `--algorithm-matrix` opts into the four supported
-execution profiles. Python-only Training Hub modes are not supported.
+sanity workload uses `lora_sft`; `--algorithm-matrix` opts into the five supported
+execution profiles. Python-only Training
+Hub modes are not supported.
 
 ```bash
 # Set TRAINING_SERVICE_URL and TRAINING_SERVICE_PROJECT; the token defaults to oc.

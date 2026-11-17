@@ -12,7 +12,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from tests.e2e.algorithms import ALGORITHMS
+from tests.e2e.algorithms import ALGORITHMS, NEW_ALGORITHMS
 
 TERMINAL = {"SUCCEEDED", "FAILED", "STOPPED"}
 TIMEOUT_VERIFICATION_SECONDS = 10
@@ -200,6 +200,23 @@ def test_algorithm_lifecycle(api, training_job, pytestconfig, observer, request)
         raise
 
 
+@pytest.mark.parametrize("training_job", NEW_ALGORITHMS, indirect=True, ids=NEW_ALGORITHMS)
+@pytest.mark.parametrize("invalid", ["unsupported", "malformed"])
+def test_new_algorithm_invalid_params_before_submission(api, training_job, invalid):
+    """Embedding SFT rejects bad overrides without creating a RayJob."""
+    job_id, payload = training_job
+    parameters = payload["algorithm"]["parameters"]
+    if invalid == "unsupported":
+        parameter = "not_a_training_hub_parameter"
+        parameters[parameter] = 1
+    else:
+        parameter = "batch_size"
+        parameters[parameter] = "not-a-number"
+    response = api.request("POST", api.jobs, expected=422, json=payload)
+    api.error(response, "validation_error", mentions=(parameter,))
+    api.error(api.request("GET", f"{api.jobs}/{job_id}", expected=404), "not_found")
+
+
 def lifecycle(api, training_job, pytestconfig, observer, executor):
     job_id, payload = training_job
     path = f"{api.jobs}/{job_id}"
@@ -360,6 +377,7 @@ def lifecycle(api, training_job, pytestconfig, observer, executor):
         filename = (
             f"lifecycle-{name}.json"
             if pytestconfig.getoption("algorithm_matrix")
+            or pytestconfig.getoption("embedding_sft_only")
             else "lifecycle.json"
         )
         (Path(directory) / filename).write_text(json.dumps(evidence, indent=2) + "\n")

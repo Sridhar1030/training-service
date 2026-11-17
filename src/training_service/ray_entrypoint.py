@@ -14,7 +14,6 @@ import sys
 from importlib import invalidate_caches
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
 SUPPORTED_DATASET_EXTENSIONS = frozenset({".jsonl", ".json", ".csv", ".parquet"})
 
@@ -25,9 +24,6 @@ class TrainingBackend:
     name = ""
     backend_name = ""
     remote_hf = False
-    requires_model = True
-    default_gpu_count = 1
-    dataset_extensions = SUPPORTED_DATASET_EXTENSIONS
 
     def required_dataset_columns(self, parameters: dict[str, Any], columns: set[str]) -> set[str]:
         """Return columns that can be checked without reading training rows."""
@@ -77,7 +73,7 @@ class TrainingBackend:
 
     def run(
         self,
-        model_path: str | None,
+        model_path: str,
         data_path: str,
         output_dir: Path,
         parameters: dict[str, Any],
@@ -86,8 +82,6 @@ class TrainingBackend:
     ) -> Any:
         import training_hub
 
-        if model_path is None:
-            raise ValueError(f"{self.name} requires model.uri.")
         algorithm = training_hub.create_algorithm(self.name, self.backend_name)
         return algorithm.train(
             model_path=self.model_path(model_path),
@@ -320,97 +314,6 @@ class EmbeddingSFTBackend(SingleNodeTrainingBackend):
         return values
 
 
-class GEPABackend(TrainingBackend):
-    name = "gepa"
-    backend_name = "gepa"
-    requires_model = False
-    default_gpu_count = 0
-    dataset_extensions = frozenset({".jsonl"})
-
-    def required_dataset_columns(self, parameters: dict[str, Any], columns: set[str]) -> set[str]:
-        return {"input", "answer"}
-
-    def validate_parameters(self, values: dict[str, Any]) -> dict[str, Any]:
-        if "trainset" in values:
-            raise ValueError("gepa trainset is not supported; provide dataset.uri instead.")
-        if any(key in values for key in ("output_dir", "run_dir")):
-            raise ValueError("gepa output paths are managed by output.destination_uri.")
-        if any(
-            key in values
-            for key in (
-                "use_wandb",
-                "wandb_api_key",
-                "wandb_init_kwargs",
-                "use_mlflow",
-                "mlflow_tracking_uri",
-                "mlflow_experiment_name",
-                "gepa_kwargs",
-            )
-        ):
-            raise ValueError(
-                "gepa external tracking and credential parameters are not supported by this API."
-            )
-        api_base = values.get("api_base")
-        if not api_base:
-            raise ValueError(
-                "gepa requires algorithm.parameters.api_base for an OpenAI-compatible "
-                "endpoint reachable from the Ray pod. Hosted API credentials are not supported."
-            )
-        try:
-            parsed = urlsplit(api_base)
-            host = parsed.hostname
-            port = parsed.port
-        except ValueError:
-            raise ValueError("gepa api_base must be a valid HTTP(S) URL.") from None
-        if port == 0:
-            raise ValueError("gepa api_base must use a nonzero port.")
-        if (
-            parsed.scheme not in {"http", "https"}
-            or not host
-            or parsed.username
-            or parsed.password
-            or parsed.query
-            or parsed.fragment
-        ):
-            raise ValueError("gepa api_base must be an HTTP(S) URL without embedded credentials.")
-        return values
-
-    def validate_resources(
-        self, gpu_count: int, num_nodes: int, gpu_type: str, parameters: dict[str, Any]
-    ) -> None:
-        if gpu_count != 0 or num_nodes != 1:
-            raise ValueError("gepa requires one CPU-only node (num_nodes=1, gpus_per_node=0).")
-
-    def validate_locations(
-        self, locations: dict[str, dict[str, str]], parameters: dict[str, Any]
-    ) -> None:
-        dataset = locations["dataset"]
-        if dataset["scheme"] == "s3" and dataset["path"].endswith("/"):
-            raise ValueError(
-                "gepa dataset.uri must identify one .jsonl S3 object, not a prefix; "
-                "the API cannot verify a prefix's file format before submission."
-            )
-        if dataset["scheme"] in {"pvc", "s3"} and not dataset["path"].lower().endswith(".jsonl"):
-            raise ValueError(
-                "gepa dataset.uri must identify a .jsonl file with input and answer fields; "
-                "Training Hub's GEPA backend does not convert JSON, CSV, or Parquet files."
-            )
-
-    def run(
-        self,
-        model_path: str | None,
-        data_path: str,
-        output_dir: Path,
-        parameters: dict[str, Any],
-        gpus_per_node: int,
-        num_workers: int,
-    ) -> Any:
-        import training_hub
-
-        algorithm = training_hub.create_algorithm(self.name, self.backend_name)
-        return algorithm.train(data_path=data_path, output_dir=str(output_dir), **parameters)
-
-
 def _validate_pretraining(values: dict[str, Any]) -> None:
     if values.get("is_pretraining") and "block_size" not in values:
         raise ValueError("block_size is required for pretraining.")
@@ -426,7 +329,6 @@ _BACKENDS = {
         LoRASFTBackend(),
         LoRAGRPOBackend(),
         EmbeddingSFTBackend(),
-        GEPABackend(),
     )
 }
 
@@ -502,10 +404,7 @@ def _ensure_s3_runtime(workdir: Path) -> None:
 
 def _algorithm_modules_available(name: str) -> bool:
     try:
-        if name == "gepa":
-            import litellm  # noqa: F401
-            from gepa import optimize  # noqa: F401
-        elif name == "embedding_sft":
+        if name == "embedding_sft":
             from sentence_transformers import SentenceTransformer  # noqa: F401
     except ImportError:
         return False
@@ -513,9 +412,8 @@ def _algorithm_modules_available(name: str) -> bool:
 
 
 def _ensure_algorithm_runtime(name: str, workdir: Path) -> None:
-    """Temporarily add missing Training Hub extras in the Ray driver, not the API pod."""
+    """Temporarily add missing Embedding SFT extras in the Ray driver, not the API pod."""
     requirements = {
-        "gepa": ("gepa==0.1.4", "litellm==1.81.11", "fastuuid==0.13.5"),
         "embedding_sft": (
             "sentence-transformers==5.7.0",
             "scikit-learn==1.7.2",
@@ -525,9 +423,8 @@ def _ensure_algorithm_runtime(name: str, workdir: Path) -> None:
     }
     if name not in requirements or _algorithm_modules_available(name):
         return
-    # TODO: Remove this job-local bootstrap when the RHOAI 3.7 Ray runtime
-    # includes GEPA and sentence-transformers. The API image cannot supply
-    # imports to the separately created RayJob pods.
+    # TODO: Remove this job-local bootstrap when the RHOAI Ray runtime includes
+    # sentence-transformers. The API image cannot supply imports to RayJob pods.
     packages = workdir / name / "site-packages"
     try:
         # Reuse the runtime's Transformers, Hub, and kernels. Resolving
@@ -615,14 +512,7 @@ def _download_s3(location: dict[str, Any], target: Path) -> str:
     return str(target)
 
 
-def _input(
-    location: dict[str, Any],
-    kind: str,
-    workdir: Path,
-    *,
-    remote_hf: bool = False,
-    dataset_extensions: frozenset[str] = SUPPORTED_DATASET_EXTENSIONS,
-) -> str:
+def _input(location: dict[str, Any], kind: str, workdir: Path, *, remote_hf: bool = False) -> str:
     scheme = location["scheme"]
     if scheme == "pvc":
         return str(location["mount_path"])
@@ -632,7 +522,7 @@ def _input(
             candidates = sorted(
                 candidate
                 for candidate in path.rglob("*")
-                if candidate.is_file() and candidate.suffix.lower() in dataset_extensions
+                if candidate.is_file() and candidate.suffix.lower() in SUPPORTED_DATASET_EXTENSIONS
             )
             if len(candidates) != 1:
                 raise ValueError("S3 dataset prefix must contain exactly one supported data file")
@@ -696,7 +586,7 @@ def _upload_s3(location: dict[str, Any], directory: Path) -> None:
 
 def _run_training(
     algorithm: str,
-    model_path: str | None,
+    model_path: str,
     data_path: str,
     output_dir: Path,
     parameters: dict[str, Any],
@@ -719,20 +609,10 @@ def main(configuration: dict[str, Any]) -> None:
     ):
         _ensure_s3_runtime(workdir)
     algorithm = configuration["algorithm"]
-    backend = get_backend(algorithm)
     _ensure_algorithm_runtime(algorithm, workdir)
-    model_path = (
-        _input(configuration["model"], "model", workdir, remote_hf=backend.remote_hf)
-        if backend.requires_model
-        else None
-    )
-    data_path = _input(
-        configuration["dataset"],
-        "dataset",
-        workdir,
-        remote_hf=backend.remote_hf,
-        dataset_extensions=backend.dataset_extensions,
-    )
+    remote_hf = get_backend(algorithm).remote_hf
+    model_path = _input(configuration["model"], "model", workdir, remote_hf=remote_hf)
+    data_path = _input(configuration["dataset"], "dataset", workdir, remote_hf=remote_hf)
     output = configuration.get("output")
     output_dir = (
         Path(output["mount_path"])

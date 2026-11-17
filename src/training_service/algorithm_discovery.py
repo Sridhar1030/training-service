@@ -51,7 +51,13 @@ def _summary(algorithm: dict[str, Any]) -> dict[str, Any]:
 def list_algorithms(request: Request) -> dict[str, Any]:
     """Return only the small catalog view; never mutate the validation artifact."""
     payload = catalog.read_catalog(request)
-    result: dict[str, Any] = {"algorithms": [_summary(item) for item in payload["algorithms"]]}
+    result: dict[str, Any] = {
+        "algorithms": [
+            _summary(item)
+            for item in payload["algorithms"]
+            if item["name"] not in catalog.GATED_ALGORITHMS
+        ]
+    }
     if "runtime" in payload:
         result["runtime"] = deepcopy(payload["runtime"])
     return result
@@ -123,7 +129,14 @@ def get_algorithm(request: Request, name: str, include: str | None = None) -> di
     if include not in (None, "parameter_schema"):
         raise ApiError(400, "bad_request", "include must be parameter_schema when supplied.")
     payload = catalog.read_catalog(request)
-    algorithm = next((item for item in payload["algorithms"] if item["name"] == name), None)
+    algorithm = next(
+        (
+            item
+            for item in payload["algorithms"]
+            if item["name"] == name and name not in catalog.GATED_ALGORITHMS
+        ),
+        None,
+    )
     if algorithm is None:
         raise ApiError(
             404, "not_found", f"Algorithm '{name}' was not found in the configured catalog."

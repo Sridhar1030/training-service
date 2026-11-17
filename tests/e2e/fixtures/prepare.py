@@ -47,5 +47,19 @@ math.write_text(
         for i in range(12)
     )
 )
+embedding = Path("/data/datasets/tiny-embedding.jsonl")
+embedding.write_text(
+    "".join(
+        json.dumps({"text": text, "label": label}) + "\n"
+        for text, label in (
+            ("A cheerful greeting", 0),
+            ("Hello and welcome", 0),
+            ("A question about weather", 1),
+            ("Will it rain today?", 1),
+            ("A short math problem", 2),
+            ("What is two plus two?", 2),
+        )
+    )
+)
 Path("/data/outputs").mkdir(exist_ok=True)
-print("Pinned public model, eight chat records and twelve math records prepared.", flush=True)
+print("Pinned public model and chat, math and embedding records prepared.", flush=True)

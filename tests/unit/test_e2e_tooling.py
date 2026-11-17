@@ -18,7 +18,7 @@ from kubernetes.client.exceptions import ApiException
 from tests.e2e import conftest as live_config
 from tests.e2e import deploy, support
 from tests.e2e import test_training_jobs as training_jobs
-from tests.e2e.algorithms import ALGORITHMS, algorithm_workload
+from tests.e2e.algorithms import ALGORITHMS, BASE_ALGORITHMS, NEW_ALGORITHMS, algorithm_workload
 from tests.e2e.conftest import LiveAPI
 from tests.e2e.environment import (
     RUN_LABEL,
@@ -55,7 +55,7 @@ def test_profiles_require_omitted_queue_and_explicit_selection(jobfile):
     assert workload(jobfile, "with-kueue")["queue_name"] == "prepared-local-queue"
 
 
-@pytest.mark.parametrize("algorithm", ALGORITHMS)
+@pytest.mark.parametrize("algorithm", BASE_ALGORITHMS)
 def test_algorithm_matrix_workloads_match_submission_validation(
     jobfile, algorithm, runtime_catalog
 ):
@@ -92,6 +92,25 @@ def test_algorithm_matrix_rejects_unshared_grpo_output(jobfile):
     payload["output"]["destination_uri"] = "s3://credentials/bucket/output/"
     with pytest.raises(ValueError, match="shared PVC output"):
         algorithm_workload(payload, "lora_grpo")
+
+
+def test_new_algorithm_matrix_workloads(jobfile):
+    from training_service.ray_entrypoint import get_backend
+
+    original = json.loads(jobfile.read_text())
+    original["dataset"]["uri"] = "pvc://e2e-storage/datasets/tiny-chat.jsonl"
+    embedding = algorithm_workload(original, "embedding_sft")
+    assert embedding["model"] == original["model"]
+    assert embedding["dataset"]["uri"].endswith("/tiny-embedding.jsonl")
+    assert embedding["algorithm"]["parameters"]["loss_type"] == "batch_all_triplet"
+    assert original["algorithm"]["name"] == "lora_sft"
+    resources = embedding["resources"]
+    get_backend("embedding_sft").validate_resources(
+        resources["gpus_per_node"],
+        resources["num_nodes"],
+        resources["gpu_type"],
+        embedding["algorithm"]["parameters"],
+    )
 
 
 @pytest.mark.parametrize(
@@ -360,10 +379,12 @@ def test_partial_setup_failure_or_interruption_still_cleans_owned_namespace(
 @pytest.mark.parametrize("reuse", [False, True])
 @pytest.mark.parametrize("private", [False, True])
 @pytest.mark.parametrize("cleanup_failure", [None, "error", "interrupt"])
-@pytest.mark.parametrize("matrix", [False, True])
+@pytest.mark.parametrize("mode", ["baseline", "matrix", "embedding"])
 def test_runner_build_push_digest_install_test_cleanup(
-    monkeypatch, tmp_path, failure, keep, missing_evidence, reuse, private, cleanup_failure, matrix
+    monkeypatch, tmp_path, failure, keep, missing_evidence, reuse, private, cleanup_failure, mode
 ):
+    matrix = mode == "matrix"
+    new_only = mode == "embedding"
     values = tmp_path / "values.yaml"
     values.write_text("env: []\n")
     args = deploy.arguments(
@@ -377,6 +398,7 @@ def test_runner_build_push_digest_install_test_cleanup(
             "--results-dir",
             str(tmp_path / "results"),
             *(["--algorithm-matrix"] if matrix else []),
+            *(["--embedding-sft-only"] if new_only else []),
             *(["--keep-resources"] if keep else []),
             *(["--use-podman-auth"] if private else []),
             *(
@@ -437,16 +459,17 @@ def test_runner_build_push_digest_install_test_cleanup(
             return "{}"
         if "pytest" in command:
             assert kwargs["cleanup_timeout"] == args.cleanup_timeout
-            job_count = (len(ALGORITHMS) if matrix else 1) + 2
+            job_count = (len(ALGORITHMS) if matrix else len(NEW_ALGORITHMS) if new_only else 1) + 2
             assert kwargs["timeout"] == job_count * (args.job_timeout + args.cleanup_timeout) + 600
             assert kwargs["env"]["TRAINING_SERVICE_CA_BUNDLE"] == str(args.ingress_ca_bundle)
             assert ("--algorithm-matrix" in command) == matrix
+            assert ("--embedding-sft-only" in command) == new_only
             if failure:
                 raise RuntimeError("live tests failed")
             if missing_evidence is True:
                 return ""
             results = Path(kwargs["env"]["TRAINING_SERVICE_EVIDENCE_DIR"])
-            names = ALGORITHMS if matrix else (None,)
+            names = ALGORITHMS if matrix else NEW_ALGORITHMS if new_only else (None,)
             for name in names:
                 filename = f"lifecycle-{name}.json" if name else "lifecycle.json"
                 (results / filename).write_text(
@@ -456,7 +479,7 @@ def test_runner_build_push_digest_install_test_cleanup(
                             "queue_admitted": True,
                             "gpu_cleanup": True,
                             "snapshot_logs": True,
-                            "sse": not matrix,
+                            "sse": not matrix and not new_only,
                             "artifacts": {"nonempty_output_files": 1},
                         }
                     )
@@ -509,12 +532,13 @@ def test_runner_build_push_digest_install_test_cleanup(
     assert invocation[invocation.index("--queue-profile") + 1] == "with-kueue"
     assert "--maxfail=0" in invocation
     assert {"--job-file", "--artifact-pod", "--observe-cluster"} <= set(invocation)
-    assert ("--check-stream" in invocation) != matrix
+    assert ("--check-stream" in invocation) == (not matrix and not new_only)
     assert "--check-active-delete" in invocation
     environment.provision.assert_called_once()
     assert environment.cleanup.called == (not keep)
     report = json.loads(next((tmp_path / "results").glob("*/run.json")).read_text())
     assert report["algorithm_matrix"] is matrix
+    assert report["embedding_sft_only"] is new_only
     assert report["outcome"] == (
         "cleanup_failed" if cleanup_failed else "failed" if failed else "passed"
     )

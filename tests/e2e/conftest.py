@@ -12,7 +12,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from tests.e2e.algorithms import algorithm_workload
+from tests.e2e.algorithms import NEW_ALGORITHMS, algorithm_workload
 from tests.e2e.support import PROFILES, api_token, namespace, workload
 
 TERMINAL = {"SUCCEEDED", "FAILED", "STOPPED"}
@@ -32,7 +32,12 @@ def pytest_addoption(parser):
     group.addoption(
         "--algorithm-matrix",
         action="store_true",
-        help="Run real sft, osft, lora_sft and lora_grpo jobs against prepared PVC fixtures.",
+        help="Run real sft, osft, lora_sft, lora_grpo and embedding_sft jobs.",
+    )
+    group.addoption(
+        "--embedding-sft-only",
+        action="store_true",
+        help="Run only embedding_sft without the older algorithm matrix.",
     )
     group.addoption("--job-timeout", type=int, default=1800, help="Training deadline in seconds.")
     group.addoption("--cleanup-timeout", type=int, default=180, help="Cleanup deadline in seconds.")
@@ -108,6 +113,7 @@ def pytest_configure(config):
         "artifact_pod",
         "queue_profile",
         "algorithm_matrix",
+        "embedding_sft_only",
     ):
         if config.getoption(option) and not config.getoption("job_file"):
             raise pytest.UsageError(f"--{option.replace('_', '-')} requires --job-file")
@@ -120,6 +126,8 @@ def pytest_configure(config):
             "observe_cluster"
         ):
             raise pytest.UsageError("Kueue enabled/absent proof requires --observe-cluster")
+    if config.getoption("algorithm_matrix") and config.getoption("embedding_sft_only"):
+        raise pytest.UsageError("Choose only one of --algorithm-matrix and --embedding-sft-only")
     if filename := config.getoption("remote_fixtures_file"):
         from tests.e2e.support import remote_workloads, s3_path
 
@@ -366,10 +374,17 @@ def forbidden_project(pytestconfig):
 def training_job(api, pytestconfig, request):
     algorithm = getattr(request, "param", None)
     matrix = pytestconfig.getoption("algorithm_matrix")
+    new_only = pytestconfig.getoption("embedding_sft_only")
     if matrix and algorithm is None:
         pytest.skip("The algorithm matrix replaces the baseline LoRA lifecycle")
-    if algorithm is not None and not matrix:
-        pytest.skip("Pass --algorithm-matrix to run all four live Training Hub algorithms")
+    if (
+        new_only
+        and algorithm is None
+        and not request.node.name.startswith("test_delete_active_job")
+    ):
+        pytest.skip("Embedding SFT replaces the baseline LoRA lifecycle")
+    if algorithm is not None and not matrix and not (new_only and algorithm in NEW_ALGORITHMS):
+        pytest.skip("Pass --algorithm-matrix or --embedding-sft-only to run live algorithms")
     filename = pytestconfig.getoption("job_file")
     if not filename:
         pytest.skip("Real training is opt-in: pass --job-file /path/to/request.json")

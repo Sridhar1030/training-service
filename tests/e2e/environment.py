@@ -606,6 +606,8 @@ def terminal_summary(evidence, results):
     tests, lifecycle = report("tests.json"), report("lifecycle.json")
     if not lifecycle:
         lifecycle = report("lifecycle-lora_sft.json")
+    if not lifecycle:
+        lifecycle = report("lifecycle-embedding_sft.json")
     checkpoints = "verified" if isinstance(lifecycle.get("artifacts"), dict) else "not verified"
     print("\nE2E SUMMARY", flush=True)
     print(f"Result: {evidence['outcome'].upper()} | namespace: {evidence['namespace']}")
@@ -622,8 +624,11 @@ def terminal_summary(evidence, results):
         f"GPU cleanup verified: {lifecycle.get('gpu_cleanup', 'not verified')} | "
         f"checkpoints: {checkpoints}"
     )
-    if evidence.get("algorithm_matrix"):
-        for name in ("sft", "osft", "lora_sft", "lora_grpo"):
+    if evidence.get("algorithm_matrix") or evidence.get("embedding_sft_only"):
+        from tests.e2e.algorithms import ALGORITHMS, NEW_ALGORITHMS
+
+        names = ALGORITHMS if evidence.get("algorithm_matrix") else NEW_ALGORITHMS
+        for name in names:
             result = report(f"lifecycle-{name}.json")
             print(f"{name}: {'SUCCEEDED' if result.get('succeeded') else 'not verified'}")
     print(f"Deployment cleanup: {evidence.get('deployment_cleanup', 'not deployed')}")

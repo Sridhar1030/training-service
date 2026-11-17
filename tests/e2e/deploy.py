@@ -123,7 +123,12 @@ def arguments(argv=None):
     parser.add_argument(
         "--algorithm-matrix",
         action="store_true",
-        help="Run all four supported Training Hub algorithms instead of baseline LoRA only",
+        help="Run five Training Hub algorithms instead of baseline LoRA only",
+    )
+    parser.add_argument(
+        "--embedding-sft-only",
+        action="store_true",
+        help="Run only embedding_sft, excluding the known-broken GRPO fixture",
     )
     parser.add_argument("--stream-timeout", type=int, default=60)
     parser.add_argument("--cleanup-timeout", type=int, default=180)
@@ -132,6 +137,8 @@ def arguments(argv=None):
 
 
 def preflight(args):
+    if args.algorithm_matrix and args.embedding_sft_only:
+        raise ValueError("Choose only one of --algorithm-matrix and --embedding-sft-only")
     if not re.fullmatch(r"quay\.io/[a-z0-9_-]+/[a-z0-9_.-]+", args.image_repository):
         raise ValueError("Use an untagged quay.io/<organization>/<repository> image repository")
     if args.reuse_image and not re.fullmatch(
@@ -231,6 +238,7 @@ def run(args):
         "release": release,
         "profile": "with-kueue",
         "algorithm_matrix": args.algorithm_matrix,
+        "embedding_sft_only": args.embedding_sft_only,
         "outcome": "incomplete",
         "chart_sha256": hashlib.sha256(
             b"".join(p.read_bytes() for p in sorted(CHART.rglob("*")) if p.is_file())
@@ -448,17 +456,25 @@ def run(args):
             "--artifact-container",
             args.artifact_container,
         ]
-        if args.algorithm_matrix:
-            test_args.append("--algorithm-matrix")
+        if args.algorithm_matrix or args.embedding_sft_only:
+            test_args.append(
+                "--algorithm-matrix" if args.algorithm_matrix else "--embedding-sft-only"
+            )
         else:
             test_args.append("--check-stream")
         if args.forbidden_project:
             test_args += ["--forbidden-project", args.forbidden_project]
         print(f"Testing {url}; results: {results}", flush=True)
-        from tests.e2e.algorithms import ALGORITHMS
+        from tests.e2e.algorithms import ALGORITHMS, NEW_ALGORITHMS
 
         # Allow each lifecycle and the two cancellation cases their own deadlines.
-        job_count = (len(ALGORITHMS) if args.algorithm_matrix else 1) + 2
+        job_count = (
+            len(ALGORITHMS)
+            if args.algorithm_matrix
+            else len(NEW_ALGORITHMS)
+            if args.embedding_sft_only
+            else 1
+        ) + 2
         # Live tests produce only sanitized assertions; no --showlocals or verbose HTTP logging.
         command(
             test_args,
@@ -468,13 +484,19 @@ def run(args):
             cleanup_timeout=args.cleanup_timeout,
         )
         # An overridden pytest selection must not silently turn this into a smoke-only pass.
-        names = ALGORITHMS if args.algorithm_matrix else (None,)
+        names = (
+            ALGORITHMS
+            if args.algorithm_matrix
+            else NEW_ALGORITHMS
+            if args.embedding_sft_only
+            else (None,)
+        )
         for name in names:
             filename = f"lifecycle-{name}.json" if name else "lifecycle.json"
             lifecycle_path = results / filename
             lifecycle = json.loads(lifecycle_path.read_text()) if lifecycle_path.is_file() else {}
             required = ("succeeded", "queue_admitted", "gpu_cleanup", "snapshot_logs")
-            if not args.algorithm_matrix:
+            if not args.algorithm_matrix and not args.embedding_sft_only:
                 required += ("sse",)
             if not all(lifecycle.get(key) for key in required) or not isinstance(
                 lifecycle.get("artifacts"), dict

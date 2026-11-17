@@ -9,13 +9,13 @@ import pytest
 from jsonschema import Draft202012Validator
 from referencing import Registry
 
-from tests.e2e.algorithms import ALGORITHMS, PARAMETERS
+from tests.e2e.algorithms import BASE_ALGORITHMS, PARAMETERS
 from training_service.contract import component_validator
 
 BASE = "/api/v1/algorithms"
 
 
-@pytest.fixture(params=ALGORITHMS)
+@pytest.fixture(params=BASE_ALGORITHMS)
 def runtime_algorithm(api, request):
     name = request.param
     detail = api.object(

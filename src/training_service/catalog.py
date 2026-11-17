@@ -13,6 +13,9 @@ from referencing import Registry
 
 from training_service.errors import ApiError
 
+# Prompt optimization is deferred until TaaS has an approved GEPA execution profile.
+GATED_ALGORITHMS = frozenset({"gepa"})
+
 _CATALOG_SCHEMA = {
     "type": "object",
     "required": ["algorithms"],
@@ -142,6 +145,8 @@ def validate_parameters(
 
     if not _finite(parameters):
         raise invalid("Algorithm parameters must be finite.")
+    if name in GATED_ALGORITHMS:
+        raise invalid(f"Algorithm '{name}' is not enabled for submission through this API.")
     if algorithm is None:
         available = ", ".join(item["name"] for item in payload["algorithms"]) or "none"
         raise invalid(
