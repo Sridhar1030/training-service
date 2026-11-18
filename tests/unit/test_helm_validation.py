@@ -345,3 +345,20 @@ def test_default_offline_install_omits_external_namespace_roles(tmp_path):
         if d["metadata"]["name"].endswith("-kueue-preflight")
     ]
     assert {d["kind"] for d in resources} == {"ClusterRole", "ClusterRoleBinding"}
+
+
+@pytest.mark.parametrize("namespace", ["true", "false", "null", "123"])
+def test_kueue_namespace_fields_are_yaml_strings(tmp_path, namespace):
+    result = render(tmp_path, {"kueuePreflight": {"namespace": namespace}}, namespace=namespace)
+    assert result.returncode == 0, result.stderr
+    resources = [
+        d
+        for d in yaml.safe_load_all(result.stdout)
+        if d["metadata"]["name"].endswith("-kueue-preflight")
+    ]
+    assert len(resources) == 4
+    for resource in resources:
+        if resource["kind"] in {"Role", "RoleBinding"}:
+            assert resource["metadata"]["namespace"] == namespace
+        if resource["kind"].endswith("Binding"):
+            assert resource["subjects"][0]["namespace"] == namespace

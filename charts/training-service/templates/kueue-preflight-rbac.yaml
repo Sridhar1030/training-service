@@ -5,7 +5,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: {{ include "training-service.rbacName" . }}-kueue-preflight
-  namespace: {{ .Values.kueuePreflight.namespace }}
+  namespace: {{ .Values.kueuePreflight.namespace | quote }}
 rules:
   - apiGroups: [apps]
     resources: [deployments]
@@ -24,7 +24,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: {{ include "training-service.rbacName" . }}-kueue-preflight
-  namespace: {{ .Values.kueuePreflight.namespace }}
+  namespace: {{ .Values.kueuePreflight.namespace | quote }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -32,7 +32,7 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: {{ include "training-service.serviceAccountName" . }}
-    namespace: {{ .Release.Namespace }}
+    namespace: {{ .Release.Namespace | quote }}
 ---
 {{- end }}
 apiVersion: rbac.authorization.k8s.io/v1
@@ -58,5 +58,5 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: {{ include "training-service.serviceAccountName" . }}
-    namespace: {{ .Release.Namespace }}
+    namespace: {{ .Release.Namespace | quote }}
 {{- end }}

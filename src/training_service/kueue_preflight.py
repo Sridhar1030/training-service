@@ -1,6 +1,7 @@
 """Fail-closed Kueue capability checks shared by discovery and queued submission."""
 
 import os
+import re
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from typing import Any
@@ -46,6 +47,8 @@ def matches(selector: Any, labels: Mapping[str, str]) -> bool:
         raise unavailable()
     pairs = selector.get("matchLabels", {})
     expressions = selector.get("matchExpressions", [])
+    pairs = {} if pairs is None else pairs
+    expressions = [] if expressions is None else expressions
     if not isinstance(pairs, dict) or not isinstance(expressions, list):
         raise unavailable()
     if not all(isinstance(k, str) and isinstance(v, str) for k, v in pairs.items()):
@@ -61,6 +64,7 @@ def matches(selector: Any, labels: Mapping[str, str]) -> bool:
         )
         if (
             not isinstance(key, str)
+            or not isinstance(op, str)
             or not isinstance(values, list)
             or not all(isinstance(value, str) for value in values)
         ):
@@ -86,25 +90,70 @@ def served_version(api: client.ApiClient) -> str:
         preferred = group.preferred_version.version
         versions = [preferred] + [v for v in versions if v != preferred]
     for version in versions:
-        resources = api.call_api(
-            f"/apis/{GROUP}/{version}",
-            "GET",
-            response_type="object",
-            auth_settings=["BearerToken"],
-            _return_http_data_only=True,
-            _request_timeout=TIMEOUT,
-        )
-        if not isinstance(resources, dict) or not isinstance(resources.get("resources"), list):
-            raise unavailable()
-        if any(
-            r.get("name") == "localqueues"
-            and r.get("namespaced") is True
-            and {"get", "list"} <= set(r.get("verbs", []))
-            for r in resources["resources"]
-        ):
+        if serves_localqueues(api, version):
             return str(version)
     # A retained/incompatible API is not proof of an absent installation.
     raise unavailable()
+
+
+def serves_localqueues(api: client.ApiClient, version: str) -> bool:
+    """Validate the discovery document before trusting resource capabilities."""
+    resources = api.call_api(
+        f"/apis/{GROUP}/{version}",
+        "GET",
+        response_type="object",
+        auth_settings=["BearerToken"],
+        _return_http_data_only=True,
+        _request_timeout=TIMEOUT,
+    )
+    if not isinstance(resources, dict) or not isinstance(resources.get("resources"), list):
+        raise unavailable()
+    found = False
+    for resource in resources["resources"]:
+        if not isinstance(resource, dict):
+            raise unavailable()
+        verbs = resource.get("verbs")
+        if not isinstance(verbs, list) or not all(isinstance(v, str) for v in verbs):
+            raise unavailable()
+        if (
+            resource.get("name") == "localqueues"
+            and resource.get("namespaced") is True
+            and {"get", "list"} <= set(verbs)
+        ):
+            found = True
+    return found
+
+
+def valid_queue_name(name: Any) -> bool:
+    """Queue DNS subdomain, bounded by the RayJob queue label's 63-character limit."""
+    label = r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?"
+    return (
+        isinstance(name, str)
+        and len(name) <= 63
+        and re.fullmatch(rf"{label}(?:\.{label})*", name) is not None
+    )
+
+
+def ready_webhook_port(reference: Any, service: Any, endpoints: Any) -> bool:
+    """Match the admission Service port to a ready backend, not any ready address."""
+    port_number = reference.port if reference.port is not None else 443
+    for port in service.spec.ports or []:
+        if port.port != port_number or (port.protocol or "TCP") != "TCP":
+            continue
+        target = port.target_port if port.target_port is not None else port.port
+        for subset in endpoints.subsets or []:
+            if not subset.addresses:
+                continue
+            for endpoint in subset.ports or []:
+                if (endpoint.name or "") != (port.name or "") or (
+                    endpoint.protocol or "TCP"
+                ) != "TCP":
+                    continue
+                # Named targetPorts are resolved by Kubernetes; EndpointPort.name is
+                # the ServicePort name, not the container port's name.
+                if isinstance(target, str) or endpoint.port == target:
+                    return True
+    return False
 
 
 def capability(labels: Mapping[str, str]) -> str:
@@ -128,8 +177,11 @@ def capability(labels: Mapping[str, str]) -> str:
         except (KeyError, yaml.YAMLError) as error:
             raise unavailable() from error
         integrations = settings.get("integrations") if isinstance(settings, dict) else None
-        if not isinstance(integrations, dict) or "ray.io/rayjob" not in (
-            integrations.get("frameworks") or []
+        frameworks = integrations.get("frameworks") if isinstance(integrations, dict) else None
+        if (
+            not isinstance(frameworks, list)
+            or not all(isinstance(value, str) for value in frameworks)
+            or "ray.io/rayjob" not in frameworks
         ):
             raise unavailable()
         # Require explicit configuration instead of guessing version-dependent defaults.
@@ -163,7 +215,8 @@ def capability(labels: Mapping[str, str]) -> str:
             "ray.io" in (r.api_groups or [])
             and "v1" in (r.api_versions or [])
             and "rayjobs" in (r.resources or [])
-            and "CREATE" in (r.operations or [])
+            and bool({"CREATE", "*"}.intersection(r.operations or []))
+            and r.scope in (None, "Namespaced", "*")
             for r in admission.rules or []
         ):
             raise unavailable()
@@ -180,7 +233,7 @@ def capability(labels: Mapping[str, str]) -> str:
         endpoints = client.CoreV1Api(api).read_namespaced_endpoints(
             service_name, namespace, _request_timeout=TIMEOUT
         )
-        if not any(subset.addresses for subset in endpoints.subsets or []):
+        if not ready_webhook_port(admission.client_config.service, service, endpoints):
             raise unavailable()
         webhook_selector = api.sanitize_for_serialization(admission.namespace_selector) or {}
         eligible = matches(webhook_selector, labels) and eligible
@@ -201,7 +254,14 @@ def preflight(api: client.ApiClient, project: str, queue: str | None = None) -> 
         raise unavailable()
     version = capability(namespace.metadata.labels or {})
     if queue is not None:
-        with describe_not_found("LocalQueue", queue, project=project):
+        check_queue(api, project, queue, version)
+    return version
+
+
+def check_queue(api: client.ApiClient, project: str, queue: str, version: str) -> None:
+    """A missing API version must not be reported as a missing queue."""
+    with describe_not_found("LocalQueue", queue, project=project):
+        try:
             client.CustomObjectsApi(api).get_namespaced_custom_object(
                 GROUP,
                 version,
@@ -210,4 +270,68 @@ def preflight(api: client.ApiClient, project: str, queue: str | None = None) -> 
                 queue,
                 _request_timeout=TIMEOUT,
             )
-    return version
+        except ApiException as error:
+            if error.status == 404:
+                with platform_client() as platform:
+                    if not serves_localqueues(platform, version):
+                        raise unavailable() from error
+            raise
+
+
+def default_queue(api: client.ApiClient, project: str) -> str | None:
+    """Resolve defaults with caller permissions and a served API, never the SDK helper.
+
+    Proven absence or a complete list without a default permits unqueued submission.
+    Failed discovery/listing must not silently turn a queued job into an unqueued job.
+    """
+    with platform_client() as platform:
+        try:
+            version = served_version(platform)
+        except ApiError as error:
+            if error.code == "kueue_not_installed":
+                return None
+            raise
+    with describe_not_found("Project", project):
+        client.CoreV1Api(api).read_namespace(project, _request_timeout=TIMEOUT)
+    try:
+        queues = client.CustomObjectsApi(api).list_namespaced_custom_object(
+            GROUP,
+            version,
+            project,
+            "localqueues",
+            _request_timeout=TIMEOUT,
+        )
+    except ApiException as error:
+        if error.status in (401, 403):
+            raise
+        raise unavailable() from error
+    if not isinstance(queues, dict) or not isinstance(queues.get("items"), list):
+        raise unavailable()
+    metadata = queues.get("metadata", {})
+    if not isinstance(metadata, dict) or metadata.get("continue"):
+        # Never infer no default from an incomplete response.
+        raise unavailable()
+    defaults = []
+    for queue in queues["items"]:
+        if not isinstance(queue, dict) or not isinstance(queue.get("metadata"), dict):
+            raise unavailable()
+        metadata = queue["metadata"]
+        annotations = metadata.get("annotations")
+        annotations = {} if annotations is None else annotations
+        if not isinstance(annotations, dict):
+            raise unavailable()
+        marker = annotations.get("kueue.x-k8s.io/default-queue", "false")
+        if not isinstance(marker, str):
+            raise unavailable()
+        # Preserve the pinned SDK's case-insensitive annotation convention.
+        if marker.lower() == "true":
+            name = metadata.get("name")
+            if not valid_queue_name(name):
+                raise unavailable()
+            defaults.append(name)
+    if len(defaults) > 1:
+        raise unavailable()
+    if not defaults:
+        return None
+    preflight(api, project, defaults[0])
+    return str(defaults[0])

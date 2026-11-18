@@ -85,7 +85,10 @@ def caller_client(request: Request) -> Iterator[client.ApiClient]:
     """Forward only a verified caller's credential; never mutate SDK defaults."""
     if not isinstance(getattr(request.state, "caller_identity", None), CallerIdentity):
         raise ApiError(403, "forbidden", "Verified caller context is unavailable.")
-    configuration = caller_configuration(request.headers["authorization"])
+    token = getattr(request.state, "caller_bearer_token", None)
+    if not isinstance(token, str) or not token or any(c.isspace() for c in token):
+        raise ApiError(403, "forbidden", "Verified caller context is unavailable.")
+    configuration = caller_configuration(f"Bearer {token}")
     try:
         with client.ApiClient(configuration) as api:
             yield api

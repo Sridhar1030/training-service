@@ -191,6 +191,7 @@ def test_list_preserves_downstream_authentication_errors(monkeypatch, status):
     monkeypatch.setattr(queue_discovery.client, "CustomObjectsApi", lambda _: custom)
     request = Request({"type": "http", "headers": [(b"authorization", b"Bearer test")]})
     request.state.caller_identity = CallerIdentity("alice", None, ())
+    request.state.caller_bearer_token = "test"
     from training_service.errors import ApiError
 
     with pytest.raises(ApiError) as raised:
@@ -217,3 +218,39 @@ def test_kueue_error_is_serialized_by_http_contract(code):
     )
     assert response.status_code == 409
     assert response.json()["code"] == code
+
+
+@pytest.mark.parametrize("header", ["Bearer verified-token", "Bearer  verified-token"])
+def test_caller_client_uses_verified_token_not_raw_header(monkeypatch, header):
+    from fastapi import Request
+    from kubernetes import client
+
+    from training_service import kubernetes_client as kc
+
+    request = Request({"type": "http", "headers": [(b"authorization", header.encode())]})
+    request.state.caller_identity = CallerIdentity("alice", None, ())
+    request.state.caller_bearer_token = "verified-token"
+    with kc.caller_client(request) as api:
+        assert api.configuration.api_key["authorization"] == "Bearer verified-token"
+    del request.state.caller_bearer_token
+    create = Mock(side_effect=AssertionError("Unverified request reached Kubernetes"))
+    monkeypatch.setattr(client, "ApiClient", create)
+    from training_service.errors import ApiError
+
+    with pytest.raises(ApiError) as error:
+        with kc.caller_client(request):
+            pass
+    assert error.value.status_code == 403
+    create.assert_not_called()
+
+
+def test_invalid_queue_project_has_documented_400():
+    from training_service.contract import load_contract
+
+    client = TestClient(create_app(FakeAuthenticator(), RecordingAuthorizer()))
+    response = client.get(
+        "/api/v1/projects/Team-Alpha/queues", headers={"Authorization": "Bearer test"}
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "bad_request"
+    assert "400" in load_contract()["paths"]["/projects/{project}/queues"]["get"]["responses"]
