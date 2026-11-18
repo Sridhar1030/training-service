@@ -126,6 +126,10 @@ async def get_algorithm(
 @router.get(
     "/projects/{project}/queues",
     responses={
+        400: {
+            "model": ErrorResponse,
+            "description": "Malformed JSON or invalid path or query parameters.",
+        },
         409: {
             "model": ErrorResponse,
             "description": (

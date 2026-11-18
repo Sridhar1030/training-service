@@ -658,6 +658,8 @@ paths:
       parameters:
         - $ref: '#/components/parameters/Project'
       responses:
+        '400':
+          $ref: '#/components/responses/400BadRequest'
         '409':
           description: Kueue absent (kueue_not_installed) or project excluded (kueue_project_excluded)
           content:
@@ -832,8 +834,9 @@ components:
             existence checks without requiring a preceding GET. Creation is not admission;
             jobs may wait for quota or GPUs. Absence or exclusion returns 409, missing
             queues return 404, caller denial 403 and uncertain readiness 503. When omitted,
-            CodeFlare uses a configured default LocalQueue if one exists;
-            otherwise the job is submitted without a queue. Subject to caller
+            the service discovers a default LocalQueue using a served Kubernetes API
+            version and applies the same preflight. Confirmed absence of Kueue or a
+            default permits unqueued submission; failed lookup returns an error. Subject to caller
             permissions and platform admission policy; this does not grant access.
           example: team-alpha-local-queue
         backend:

@@ -860,7 +860,10 @@ def test_submission_and_operations_share_caller_configuration(monkeypatch, overr
         {
             "type": "http",
             "headers": [(b"authorization", b"Bearer caller-token")],
-            "state": {"caller_identity": CallerIdentity("alice", "uid-a", ())},
+            "state": {
+                "caller_identity": CallerIdentity("alice", "uid-a", ()),
+                "caller_bearer_token": "caller-token",
+            },
         }
     )
     with (
@@ -908,7 +911,10 @@ def test_invalid_kubernetes_url_never_creates_caller_client(monkeypatch, operati
                 {
                     "type": "http",
                     "headers": [(b"authorization", b"Bearer caller-token")],
-                    "state": {"caller_identity": CallerIdentity("alice", "uid-a", ())},
+                    "state": {
+                        "caller_identity": CallerIdentity("alice", "uid-a", ()),
+                        "caller_bearer_token": "caller-token",
+                    },
                 }
             )
             with kubernetes_client.caller_client(request):
@@ -1139,9 +1145,11 @@ def test_algorithm_parameters_cannot_override_platform_or_python_configuration(
     assert raised.value.status_code == 422
 
 
+@pytest.mark.parametrize("queue_mode", ["explicit", "default", "unqueued"])
 def test_real_sdk_submits_with_caller_client_and_configured_ray_image(
     monkeypatch: pytest.MonkeyPatch,
     runtime_catalog,
+    queue_mode,
 ) -> None:
     # CodeFlare's vendored wrappers load a default kubeconfig in __init__ even
     # though RayJob immediately replaces their clients with the caller's client.
@@ -1172,15 +1180,21 @@ def test_real_sdk_submits_with_caller_client_and_configured_ray_image(
     metadata = json.loads(runtime_catalog.read_text())
     metadata["runtime"]["image"] = image
     runtime_catalog.write_text(json.dumps(metadata))
+    body = _sample()
+    expected_queue = body.queue_name
+    if queue_mode != "explicit":
+        body = body.model_copy(update={"queue_name": None})
+        expected_queue = "gpu.batch" if queue_mode == "default" else None
+        monkeypatch.setattr(submission, "default_queue", Mock(return_value=expected_queue))
     identifier = submission.CodeFlareJobBackend(image)._submit_sync(
-        "team-alpha", _sample(), CallerIdentity("alice", None, ()), "caller-token"
+        "team-alpha", body, CallerIdentity("alice", None, ()), "caller-token"
     )
 
     assert identifier == "pvc-training"
     assert len(created) == 1
     assert created[0]["metadata"]["annotations"]["training.rhoai.io/submitted-by"] == "alice"
-    assert created[0]["metadata"]["labels"]["kueue.x-k8s.io/queue-name"] == (
-        "team-alpha-local-queue"
+    assert (
+        created[0]["metadata"].get("labels", {}).get("kueue.x-k8s.io/queue-name") == expected_queue
     )
     spec = created[0]["spec"]["rayClusterSpec"]
     assert spec["rayVersion"] == "2.58.0"
@@ -2252,6 +2266,7 @@ def mock_queue_preflight(monkeypatch):
     # These tests exercise submission; capability checks have separate Kubernetes mocks.
     check = Mock(return_value="v1beta2")
     monkeypatch.setattr(submission, "preflight", check)
+    monkeypatch.setattr(submission, "default_queue", Mock(return_value=None))
     return check
 
 
@@ -2278,3 +2293,75 @@ def test_queue_preflight_failure_prevents_creation(monkeypatch, mock_queue_prefl
         )
     assert error.value.code == code
     assert FakeRayJob.instances == []
+
+
+@pytest.mark.parametrize(
+    "name,valid",
+    [
+        ("gpu.batch", True),
+        ("gpu-batch", True),
+        ("bad/name", False),
+        ("a..b", False),
+        ("a" * 64, False),
+    ],
+)
+def test_queue_names_support_dns_subdomains(name, valid):
+    body = _sample().model_copy(update={"queue_name": name})
+    if valid:
+        submission._validate_request(body)
+    else:
+        with pytest.raises(ApiError) as error:
+            submission._validate_request(body)
+        assert error.value.status_code == 422
+
+
+def test_omitted_queue_passes_resolved_default_to_sdk(monkeypatch):
+    _mock_sdk(monkeypatch)
+    resolve = Mock(return_value="gpu.batch")
+    monkeypatch.setattr(submission, "default_queue", resolve)
+    body = _sample().model_copy(update={"queue_name": None})
+    submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")._submit_sync(
+        "team-alpha", body, CallerIdentity("alice", None, ()), "caller-token"
+    )
+    assert FakeRayJob.instances[0].kwargs["local_queue"] == "gpu.batch"
+    assert resolve.call_args.args[0].token == "caller-token"
+
+
+@pytest.mark.parametrize("status", [403, 503])
+def test_failed_default_lookup_prevents_creation(monkeypatch, status):
+    _mock_sdk(monkeypatch)
+    monkeypatch.setattr(
+        submission,
+        "default_queue",
+        Mock(
+            side_effect=ApiError(
+                status, "forbidden" if status == 403 else "backend_unavailable", "Unavailable"
+            )
+        ),
+    )
+    body = _sample().model_copy(update={"queue_name": None})
+    with pytest.raises(ApiError) as error:
+        submission.CodeFlareJobBackend("quay.io/example/ray:2.58.0")._submit_sync(
+            "team-alpha", body, CallerIdentity("alice", None, ()), "caller-token"
+        )
+    assert error.value.status_code == status
+    assert FakeRayJob.instances == []
+
+
+def test_confirmed_unqueued_result_suppresses_only_matching_sdk_fallback(monkeypatch):
+    network = Mock(return_value={"items": [{"metadata": {"name": "other"}}]})
+    monkeypatch.setattr(client.ApiClient, "call_api", network)
+    with submission._CallerApiClient(client.Configuration()) as api:
+        api.unqueued_project = "team-alpha"
+        custom = client.CustomObjectsApi(api)
+        assert custom.list_namespaced_custom_object(
+            "kueue.x-k8s.io", "v1beta1", "team-alpha", "localqueues"
+        ) == {"items": []}
+        network.assert_not_called()
+        custom.list_namespaced_custom_object(
+            "kueue.x-k8s.io", "v1beta2", "team-alpha", "localqueues"
+        )
+        custom.list_namespaced_custom_object(
+            "kueue.x-k8s.io", "v1beta1", "other-project", "localqueues"
+        )
+        assert network.call_count == 2

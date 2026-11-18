@@ -1,6 +1,6 @@
 # Kueue discovery and queued submission
 
-GET queues and POST with an explicit `queue_name` share a fail-closed preflight.
+GET queues and POST with an explicit or discovered default queue share a fail-closed preflight.
 Authentication and project authorization run first. Namespace and LocalQueue reads
 use the caller credential. Platform readiness reads use the service account and
 only the named installation resources configured in `kueuePreflight` Helm values.
@@ -37,6 +37,11 @@ with a ready backend. The manager configuration's explicit namespace selector an
 the webhook namespace selector both apply. Caller permission failures remain
 401/403; unavailable or unrecognized capability checks fail closed with 503.
 
+Readiness checks the registered webhook and a ready backend for its configured
+Service port. It does not establish API-server network reachability or validate
+`caBundle`/serving-certificate trust. Network policy or certificate rotation can
+still cause submission to fail after successful preflight; admission is authoritative.
+
 An available controller/webhook can serve during a rolling update. The preflight
 does not reproduce operator ConfigMap digests or depend on config mount/argument
 layout. It reads configured namespace policy; Kueue admission remains authoritative,
@@ -63,3 +68,19 @@ method directly sets `kueue.x-k8s.io/queue-name`. It does not call
 `local_queue_exists`, validate the namespace selector, or inspect controller health.
 It relies on mutation to suspend the job. Separate cluster/queue SDK helpers are
 not evidence of checks on this path. Discovery uses Kubernetes directly, not SDK helpers.
+
+## Default queues
+
+When `queue_name` is omitted or null, the service discovers a served LocalQueue
+API version and lists queues with caller credentials. A single queue annotated
+`kueue.x-k8s.io/default-queue: "true"` is checked with the same readiness,
+eligibility, and existence preflight and passed explicitly to CodeFlare.
+Confirmed Kueue absence or a complete list with no default permits unqueued
+submission. Permission errors remain 401/403; ambiguous defaults, incomplete
+responses, and unavailable discovery fail closed rather than silently dropping
+the queue. Selected queue names must fit the RayJob label's 63-character limit.
+
+CodeFlare 0.40.1's fallback lookup hardcodes `v1beta1` and suppresses 403/404.
+For a confirmed unqueued submission, the request-scoped SDK transport reuses
+our empty default result instead of repeating that lookup. No global SDK state
+is patched. Configuration may still change after preflight.

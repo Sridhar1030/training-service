@@ -38,7 +38,7 @@ from training_service.kubernetes_client import (
     describe_not_found,
     validate_names,
 )
-from training_service.kueue_preflight import preflight
+from training_service.kueue_preflight import default_queue, preflight, valid_queue_name
 from training_service.log_config import LogBackendConfig, LogBackendResolver
 from training_service.logs import CodeFlareLogClient, LogClient, logs_not_found, logs_unavailable
 from training_service.ray_entrypoint import get_backend
@@ -69,8 +69,24 @@ class _SdkSubmissionError(Exception):
 class _CallerApiClient(client.ApiClient):
     """Keep the caller identity and preserve errors from SDK-owned RayJob creation."""
 
+    # Request-scoped proof that our version-aware lookup found no default. The
+    # pinned SDK otherwise repeats that lookup using v1beta1 and suppresses denials.
+    unqueued_project: str | None = None
+
     def call_api(self, resource_path: str, method: str, *args: Any, **kwargs: Any) -> Any:
         path_params = args[0] if args else kwargs.get("path_params")
+        if (
+            self.unqueued_project is not None
+            and resource_path == _RAYJOB_CREATE_PATH
+            and method == "GET"
+            and isinstance(path_params, dict)
+            and path_params.get("group") == "kueue.x-k8s.io"
+            and path_params.get("version") == "v1beta1"
+            and path_params.get("plural") == "localqueues"
+            and path_params.get("namespace") == self.unqueued_project
+        ):
+            # Reuse the already established result, without shared SDK mutation.
+            return {"items": []}
         is_rayjob_create = (
             resource_path == _RAYJOB_CREATE_PATH
             and method == "POST"
@@ -193,10 +209,8 @@ def _validate_request(
     parameters = validate_algorithm_parameters(
         request.algorithm.name, request.algorithm.parameters, runtime_image
     )
-    if request.queue_name is not None and (
-        len(request.queue_name) > 63 or not _NAME_PATTERN.fullmatch(request.queue_name)
-    ):
-        raise _invalid("queue_name must be a DNS-1123 label.")
+    if request.queue_name is not None and not valid_queue_name(request.queue_name):
+        raise _invalid("queue_name must be a DNS subdomain of at most 63 characters.")
     resources = request.resources or ResourceSpec()
     cpu = resources.cpus_per_node or "4"
     memory = resources.memory_per_node or "16Gi"
@@ -442,8 +456,13 @@ class CodeFlareJobBackend:
         }
 
         with _caller_api_client(token) as api_client:
-            if request.queue_name is not None:
-                preflight(api_client, project, request.queue_name)
+            queue = request.queue_name
+            if queue is not None:
+                preflight(api_client, project, queue)
+            else:
+                queue = default_queue(api_client, project)
+                if queue is None:
+                    api_client.unqueued_project = project
             core_api = client.CoreV1Api(api_client)
             resolved, volumes, mounts, hf_tokens = _storage_plan(
                 core_api, project, locations, resources.num_nodes or 1
@@ -499,7 +518,7 @@ class CodeFlareJobBackend:
                     }
                 ),
                 cluster_config=cluster,
-                local_queue=request.queue_name,
+                local_queue=queue,
                 annotations=annotations,
                 api_client=api_client,
             )
