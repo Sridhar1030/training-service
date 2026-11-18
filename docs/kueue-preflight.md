@@ -29,24 +29,29 @@ Set the namespace, Deployment, ConfigMap, mutating webhook configuration, and
 webhook Service names in the chart to match the actual installation. The chart
 creates named-resource read-only permissions in that namespace, plus get on the
 named webhook and Kueue discovery URLs. Callers need no platform/admin reads.
-If Kueue is absent, disable `kueuePreflight.createRBAC` until its namespace exists
-and provision platform discovery permissions separately as needed.
 
-Checks require a current, available controller Deployment mounting the named
-ConfigMap with `--config` referencing `controller_manager_config.yaml`, an explicit
-`managedJobsNamespaceSelector`, and `ray.io/rayjob` in `integrations.frameworks`.
-The RayJob CREATE mutating webhook must point to the configured Service, fail
-closed, have ready endpoints, and select the controller's pod labels. Its namespace
-selector is evaluated as well. Arbitrary CEL match conditions and object selectors
-are unsupported and fail closed instead of claiming readiness. ConfigMap contents must match the RHBoK operator-generated
-`configmap/<name>` pod-template digest, and the observed Deployment must have all
-replicas updated and ready with no old replicas remaining. A changed ConfigMap,
-missing digest, or incomplete rollout returns 503. This binds the inspected data
-to the completed rollout instead of assuming edited data was loaded. Arbitrary
-non-RHBoK installations without this rollout evidence need an adapter and fail closed.
-No DSC integration is required. The hash follows the operator
-[implementation](https://github.com/openshift/kueue-operator/blob/main/pkg/operator/target_config_reconciler.go):
-SHA256 of Go JSON-encoded ConfigMap data.
+
+Readiness requires a served LocalQueue API, at least one available controller
+replica, the configured RayJob integration, and a matching CREATE admission webhook
+with a ready backend. The manager configuration's explicit namespace selector and
+the webhook namespace selector both apply. Caller permission failures remain
+401/403; unavailable or unrecognized capability checks fail closed with 503.
+
+An available controller/webhook can serve during a rolling update. The preflight
+does not reproduce operator ConfigMap digests or depend on config mount/argument
+layout. It reads configured namespace policy; Kueue admission remains authoritative,
+and checks cannot make configuration changes atomic with submission. Nonempty
+webhook object selectors and CEL conditions are unsupported and fail closed.
+Empty selector forms are equivalent and accepted.
+
+On installation/upgrade Helm looks up the configured Kueue namespace and creates
+its external-namespace Role/RoleBinding only if that namespace exists. It never
+creates an operator namespace. Cluster-scoped discovery grants remain available
+so an absent installation can be identified. If Kueue is installed later, run
+`helm upgrade` again to provision the namespace-scoped grants. Offline `helm template`
+cannot discover external namespaces; use connected server-side rendering for a
+complete manifest when Kueue is installed. `createRBAC: false` is for externally
+managed grants, not for disabling Kueue or discovery.
 
 ## Pinned SDK verification
 
@@ -58,52 +63,3 @@ method directly sets `kueue.x-k8s.io/queue-name`. It does not call
 `local_queue_exists`, validate the namespace selector, or inspect controller health.
 It relies on mutation to suspend the job. Separate cluster/queue SDK helpers are
 not evidence of checks on this path. Discovery uses Kubernetes directly, not SDK helpers.
-
-## Read-only development-cluster evidence
-
-On 2026-11-17, exercised discovery with actual `oc` reads from
-`api.dev.aip-ft.rh-ods.com`. The platform client boundary was replaced with the
-logged-in user's read-only `oc` transport for this check; this is not evidence of
-service-account RBAC or a deployed HTTP endpoint.
-
-* `training-service`: retained `queue-discovery-smoke` LocalQueue, but missing
-  the installed selector's enrollment label; returned 409 `kueue_project_excluded`.
-* `test-efazal`: already eligible; returned enabled and LocalQueue `pr11-review`
-  backed by `default` through discovered `v1beta2`.
-* The RHBoK controller mounts its config using a single-file `subPath`; this
-  layout and the API's empty webhook object selector have regression coverage.
-
-No cluster objects were changed and no RayJobs were submitted. Deployed HTTP,
-service-account permissions, queued POST and actual admission still need end-to-end
-validation. Two controller Deployments were observed, in `kueue-system` and
-`openshift-kueue-operator`; the RayJob webhook targets the latter installation.
-
-## Deployed HTTP canary verification (2026-11-17)
-
-Subsequently deployed `kueue-review-check-training-service` in `training-service`
-using the chart's service account and named-resource RBAC. The existing compatible
-service image (CodeFlare 0.40.1, Ray 2.58.0) loaded this branch's complete source and
-OpenAPI files from a read-only ConfigMap overlay. This validates deployed code/RBAC,
-not a newly built release image. HTTPS calls validated the ingress certificate;
-credentials were held in memory, not written into evidence.
-
-| Check | Actual response |
-| --- | --- |
-| POST excluded project before any GET | 409 `kueue_project_excluded` |
-| POST eligible project, missing LocalQueue, before GET | 404 `not_found`, LocalQueue message |
-| POST existing eligible queue, intentionally missing PVC | 404 `not_found`, PVC message: queue preflight passed |
-| GET excluded project retaining a LocalQueue | 409 `kueue_project_excluded` |
-| GET eligible `test-efazal` | 200, enabled, `pr11-review` / `default` |
-| Invalid bearer token | 401 `unauthorized` |
-| Authenticated canary service account without project permission | 403 `forbidden` |
-
-All expected statuses passed after fixing missing error-enum entries discovered by
-the initial HTTP run. Regression tests now exercise serialization through the HTTP
-error handler. The actual operator-generated ConfigMap digest matched the current
-configuration; stale/missing digests and incomplete rollouts have regression tests.
-Final local validation: 865 tests, lint, formatting, mypy and Helm lint passed.
-
-No RayJobs were created by these negative/preflight tests; neither successful 202
-submission nor actual Kueue admission/GPU execution was tested here. They are not
-claimed by the evidence above. Temporary canary resources and its RBAC are cleaned
-up after verification; existing services, queues and Kueue policy are unchanged.
