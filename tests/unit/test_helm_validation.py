@@ -298,7 +298,7 @@ def test_custom_trust_or_gateway_omits_platform_ca_permission(tmp_path, values):
 def test_kueue_platform_rbac_is_named_read_only_and_namespace_isolated(tmp_path):
     names = []
     for namespace in ("team-a", "team-b"):
-        result = render(tmp_path, {}, namespace=namespace)
+        result = render(tmp_path, {"kueuePreflight": {"namespace": namespace}}, namespace=namespace)
         assert result.returncode == 0, result.stderr
         resources = [
             d
@@ -323,7 +323,7 @@ def test_kueue_platform_rbac_is_named_read_only_and_namespace_isolated(tmp_path)
                         assert len(rule["resourceNames"]) == 1
                         assert not set(rule["resources"]) & {"secrets", "localqueues", "rayjobs"}
             if resource["kind"] in {"Role", "RoleBinding"}:
-                assert resource["metadata"]["namespace"] == "openshift-kueue-operator"
+                assert resource["metadata"]["namespace"] == namespace
     assert names[0].isdisjoint(names[1])
 
 
@@ -334,3 +334,14 @@ def test_kueue_rbac_can_be_provisioned_externally(tmp_path):
         d["metadata"]["name"].endswith("-kueue-preflight")
         for d in yaml.safe_load_all(result.stdout)
     )
+
+
+def test_default_offline_install_omits_external_namespace_roles(tmp_path):
+    result = render(tmp_path, {})
+    assert result.returncode == 0, result.stderr
+    resources = [
+        d
+        for d in yaml.safe_load_all(result.stdout)
+        if d["metadata"]["name"].endswith("-kueue-preflight")
+    ]
+    assert {d["kind"] for d in resources} == {"ClusterRole", "ClusterRoleBinding"}

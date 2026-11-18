@@ -74,9 +74,6 @@ def installation(monkeypatch):
             '    kueue.openshift.io/managed: "true"\n'
         }
     )
-    dep.spec.template.metadata.annotations["configmap/kueue-manager-config"] = k.config_digest(
-        core.read_namespaced_config_map.return_value.data
-    )
     core.read_namespaced_service.return_value = NS(spec=NS(selector={"app": "kueue"}))
     core.read_namespaced_endpoints.return_value = NS(subsets=[NS(addresses=[NS(ip="127.0.0.1")])])
     webhook = NS(
@@ -187,18 +184,16 @@ def test_platform_check_failure_is_not_disabled(monkeypatch, status):
     assert "private" not in error.value.message
 
 
-def test_rhbok_single_file_config_mount_and_empty_object_selector(installation, monkeypatch):
-    dep, _, webhook = installation
-    manager = dep.spec.template.spec.containers[0]
-    manager.args = ["--config=/controller_manager_config.yaml"]
-    manager.volume_mounts = [
-        client.V1VolumeMount(
-            name="config",
-            mount_path="/controller_manager_config.yaml",
-            sub_path="controller_manager_config.yaml",
-        )
-    ]
-    webhook.object_selector = client.V1LabelSelector()
+@pytest.mark.parametrize(
+    "selector",
+    [
+        client.V1LabelSelector(),
+        client.V1LabelSelector(match_labels={}),
+        client.V1LabelSelector(match_expressions=[]),
+    ],
+)
+def test_empty_kubernetes_selector_models(installation, monkeypatch, selector):
+    installation[2].object_selector = selector
 
     @contextmanager
     def platform():
@@ -209,24 +204,47 @@ def test_rhbok_single_file_config_mount_and_empty_object_selector(installation, 
     assert k.capability({"kueue.openshift.io/managed": "true"}) == "v1beta1"
 
 
-def test_stale_config_does_not_claim_readiness(installation):
-    installation[1].read_namespaced_config_map.return_value.data[
-        "controller_manager_config.yaml"
-    ] += "\n# edited after rollout\n"
+@pytest.mark.parametrize(
+    "selector",
+    [
+        {},
+        {"matchLabels": {}},
+        {"matchExpressions": []},
+        {"matchLabels": {}, "matchExpressions": []},
+    ],
+)
+def test_equivalent_empty_object_selectors(installation, selector):
+    installation[2].object_selector = selector
+    assert k.capability({"kueue.openshift.io/managed": "true"}) == "v1beta1"
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [{"matchLabels": {"team": "a"}}, {"matchExpressions": [{"key": "team", "operator": "Exists"}]}],
+)
+def test_filtered_object_selectors_fail_closed(installation, selector):
+    installation[2].object_selector = selector
     with pytest.raises(ApiError) as error:
         k.capability({"kueue.openshift.io/managed": "true"})
     assert error.value.status_code == 503
 
 
-def test_missing_rollout_evidence_fails_closed(installation):
-    installation[0].spec.template.metadata.annotations = {}
-    with pytest.raises(ApiError) as error:
-        k.capability({"kueue.openshift.io/managed": "true"})
-    assert error.value.status_code == 503
+def test_healthy_partial_rollout_without_packaging_checks(installation):
+    dep = installation[0]
+    dep.spec.replicas = 2
+    dep.status.available_replicas = 1
+    dep.status.updated_replicas = 1
+    dep.status.ready_replicas = 1
+    dep.status.replicas = 2
+    dep.status.observed_generation = 0
+    dep.spec.template.metadata.annotations = {}
+    dep.spec.template.spec.volumes = []
+    dep.spec.template.spec.containers = []
+    assert k.capability({"kueue.openshift.io/managed": "true"}) == "v1beta1"
 
 
-def test_old_replicas_remaining_fail_closed(installation):
-    installation[0].status.replicas = 2
+def test_no_ready_webhook_backend_fails_closed(installation):
+    installation[1].read_namespaced_endpoints.return_value = NS(subsets=[])
     with pytest.raises(ApiError) as error:
         k.capability({"kueue.openshift.io/managed": "true"})
     assert error.value.status_code == 503

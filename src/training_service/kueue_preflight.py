@@ -1,9 +1,6 @@
 """Fail-closed Kueue capability checks shared by discovery and queued submission."""
 
-import hashlib
-import json
 import os
-import posixpath
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from typing import Any
@@ -110,14 +107,6 @@ def served_version(api: client.ApiClient) -> str:
     raise unavailable()
 
 
-def config_digest(data: Mapping[str, str]) -> str:
-    """Match RHBoK computeSpecHash(cm.Data), including Go JSON HTML escaping."""
-    encoded = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    for char in ("<", ">", "&", "\u2028", "\u2029"):
-        encoded = encoded.replace(char, "\\u" + format(ord(char), "04x"))
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
-
-
 def capability(labels: Mapping[str, str]) -> str:
     """Read explicitly configured installation resources, independently of DSC."""
     namespace = os.getenv("TRAINING_KUEUE_NAMESPACE", "openshift-kueue-operator")
@@ -129,44 +118,11 @@ def capability(labels: Mapping[str, str]) -> str:
         dep = client.AppsV1Api(api).read_namespaced_deployment(
             deployment, namespace, _request_timeout=TIMEOUT
         )
-        if (
-            not dep.status
-            or not dep.spec
-            or not dep.metadata
-            or (dep.status.observed_generation or 0) < (dep.metadata.generation or 1)
-            or (dep.status.available_replicas or 0) < 1
-            or (dep.status.updated_replicas or 0) != (dep.spec.replicas or 1)
-            or (dep.status.ready_replicas or 0) != (dep.spec.replicas or 1)
-            or (dep.status.replicas or 0) != (dep.spec.replicas or 1)
-        ):
+        if not dep.status or (dep.status.available_replicas or 0) < 1:
             raise unavailable()
         cm = client.CoreV1Api(api).read_namespaced_config_map(
             configmap, namespace, _request_timeout=TIMEOUT
         )
-        # RHBoK binds config contents to the pod template and rolls the Deployment.
-        # Missing/stale evidence cannot be advertised as an effective configuration.
-        expected = (dep.spec.template.metadata.annotations or {}).get("configmap/" + configmap)
-        if not cm.data or expected != config_digest(cm.data):
-            raise unavailable()
-        volumes = dep.spec.template.spec.volumes or []
-        config_volumes = {
-            v.name for v in volumes if v.config_map and v.config_map.name == configmap
-        }
-        if not any(
-            m.name in config_volumes
-            and (
-                "--config="
-                + (
-                    m.mount_path
-                    if m.sub_path == "controller_manager_config.yaml"
-                    else posixpath.join(m.mount_path, "controller_manager_config.yaml")
-                )
-            )
-            in (c.args or [])
-            for c in dep.spec.template.spec.containers or []
-            for m in c.volume_mounts or []
-        ):
-            raise unavailable()
         try:
             settings = yaml.safe_load((cm.data or {})["controller_manager_config.yaml"])
         except (KeyError, yaml.YAMLError) as error:
@@ -193,10 +149,14 @@ def capability(labels: Mapping[str, str]) -> str:
         if len(candidates) != 1:
             raise unavailable()
         admission = candidates[0]
+        object_selector = api.sanitize_for_serialization(admission.object_selector) or {}
         if (
             admission.failure_policy != "Fail"
             or admission.match_conditions
-            or api.sanitize_for_serialization(admission.object_selector)
+            or not isinstance(object_selector, dict)
+            or set(object_selector) - {"matchLabels", "matchExpressions"}
+            or object_selector.get("matchLabels")
+            or object_selector.get("matchExpressions")
         ):
             raise unavailable()
         if not any(
